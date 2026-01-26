@@ -1,0 +1,105 @@
+# BF30A2 Camera Driver Configuration
+menuconfig BSP_USING_BF30A2
+    bool "Enable BF30A2 SPI Camera Driver"
+    select BSP_USING_SPI2
+    select BSP_SPI2_RX_USING_DMA
+    default y
+    help
+        Enable BF30A2 SPI camera with RT-Thread standard device driver.
+
+if BSP_USING_BF30A2
+
+    config BF30A2_DEVICE_NAME
+        string "Device name"
+        default "bf30a2"
+
+    config BF30A2_AUTO_REGISTER
+        bool "Auto register device on boot"
+        default y
+        help
+            Automatically register BF30A2 device during system initialization.
+
+    menu "Hardware Configuration"
+        config BF30A2_SPI_BUS
+            string "SPI bus name"
+            default "spi2"
+
+        config BF30A2_I2C_BUS
+            string "I2C bus name"
+            default "i2c2"
+
+        config BF30A2_I2C_ADDR
+            hex "I2C slave address"
+            default 0x6E
+
+        config BF30A2_PWM_DEV
+            string "PWM device name"
+            default "pwm2"
+
+        config BF30A2_PWM_CHANNEL
+            int "PWM channel"
+            range 1 4
+            default 2
+
+        comment "Pin Configuration (PA pin number offset, e.g., 39 means PA39)"
+
+        config BF30A2_SPI_CLK_PAD
+            int "SPI CLK pad (PA offset)"
+            range 0 63
+            default 39
+            help
+                SPI clock pin number offset from PA00.
+                Default 39 means PA39.
+
+        config BF30A2_SPI_DIO_PAD
+            int "SPI DIO pad (PA offset)"
+            range 0 63
+            default 37
+            help
+                SPI data IO pin number offset from PA00.
+                Default 37 means PA37.
+
+        config BF30A2_SPI_CS_PAD
+            int "SPI CS pad (PA offset)"
+            range 0 63
+            default 40
+            help
+                SPI chip select pin number offset from PA00.
+                Default 40 means PA40.
+
+        config BF30A2_I2C_SCL_PAD
+            int "I2C SCL pad (PA offset)"
+            range 0 63
+            default 41
+            help
+                I2C clock pin number offset from PA00.
+                Default 41 means PA41.
+
+        config BF30A2_I2C_SDA_PAD
+            int "I2C SDA pad (PA offset)"
+            range 0 63
+            default 42
+            help
+                I2C data pin number offset from PA00.
+                Default 42 means PA42.
+
+        config BF30A2_PWM_PAD
+            int "PWM MCLK pad (PA offset)"
+            range 0 63
+            default 20
+            help
+                PWM output pin number offset from PA00.
+                Default 20 means PA20.
+
+        config BF30A2_PWDN_PIN
+            int "Power down GPIO pin (PA offset)"
+            range 0 63
+            default 43
+            help
+                Power down control pin number offset from PA00.
+                Default 43 means PA43.
+    endmenu
+
+    config BF30A2_DEBUG
+        bool "Enable debug output"
+        default n

@@ -1,0 +1,22 @@
+from building import *
+import rtconfig
+import os
+
+src = []
+inc = []
+cwd = GetCurrentDir() # get current dir path
+
+src=Glob('*.c')
+
+# check if .h or .hpp files exsit
+def check_h_hpp_exsit(path):
+    file_dirs = os.listdir(path)
+    for file_dir in file_dirs:
+        if os.path.splitext(file_dir)[1] in ['.h', '.hpp']:
+            return True
+    return False
+
+inc = inc + [cwd]
+group = DefineGroup('drv_bf30a2', src, depend = ['BSP_USING_BF30A2'], CPPPATH = inc)
+Return('group')
+
