@@ -23,4 +23,4 @@ class Bf30A2_DriverRecipe(ConanFile):
     def requirements(self):
         # add your package dependencies here, for example:
         # self.requires("fmt/8.1.1")
-        
+        pass
