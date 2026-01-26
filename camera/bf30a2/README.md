@@ -27,7 +27,20 @@ scons --board=sf32lb52-lcd_n16r8 -j8
 
 关于编译、下载的详细步骤，请参考[](/quickstart/get-started.md)的相关介绍。
 
+## 文件说明
 
+```
+bf30a2_driver/
+├── src/
+│   ├── drv_bf30a2.h      # 驱动头文件（接口定义）
+│   ├── drv_bf30a2.c      # 驱动实现
+│   ├── main.c            # 例程（含 LVGL 显示和拍照功能）
+│   └── SConscript        # 构建脚本
+└── project/
+    ├── Kconfig           # Kconfig 配置
+    ├── proj.conf         # 项目配置
+    └── ...               # 其他构建文件
+```
 
 ### 硬件连接
 ```{eval-rst}
