@@ -7,8 +7,8 @@ class Bf30A2_DriverRecipe(ConanFile):
     license = "Apache-2.0"
     user = "jingle_xie"
     author = "jingle_xie"
-    url = "https://packages.sifli.com/zh/packages/jingle_xie/bf30a2_driver"
-    homepage = "https://packages.sifli.com/zh/packages/jingle_xie/bf30a2_driver"
+    url = "https://packages.sifli.com/zh/packages/jingle_xie/bf30a2"
+    homepage = "https://packages.sifli.com/zh/packages/jingle_xie/bf30a2"
     description = "The BF30A2 SPI camera is equipped with a compliant device driver implementation."
     topics = ("driver", "camera", "bf30a2")
 
