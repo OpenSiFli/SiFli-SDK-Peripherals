@@ -1,0 +1,105 @@
+menu "ov2640 camera"
+
+    config SENSOR_USING_OV2640
+        bool "Enable OV2640 Camera Module"
+        default y
+        help
+          Enable this option to use OV2640 as the camera sensor module.
+		  
+    menu "DVP configuration"
+        depends on SENSOR_USING_OV2640
+
+      config OV2640_DVP_PINGPONG_BUFFER_SIZE
+            int "DVP PingPong Buffer Size"
+            default 8192
+            range 1024 65536
+            help
+              Specify the size of the ping-pong buffer used for DVP data capture from the OV2640 camera module.
+
+        config OV2640_DVP_DATA_PIN_BASE
+            int "DVP Data Pin Base Numbers"
+            default 0
+            help
+              DO NOT MODIFY! Only for internal use to specify the base pin number for DVP data pins (D0-D7) of the OV2640 camera module.
+        config OV2640_DVP_VSYNC_PIN
+            int "DVP VSYNC Pin Number"
+            default 42
+            help
+              Specify the pin number connected to the DVP VSYNC signal of the OV2640 camera module.
+              This pin is used for GPIO interrupt.
+
+    endmenu
+
+    menu "SCCB configuration"
+        depends on SENSOR_USING_OV2640
+
+        config OV2640_SCCB_I2C_BUS_NAME
+            string "SCCB I2C Bus Name"
+            default "i2c1"
+            help
+              Specify the I2C bus name used for SCCB communication with the OV2640 camera module.
+
+        config OV2640_SCCB_TIMEOUT_MS
+            int "SCCB Timeout (ms)"
+            default 1000
+            help
+              Specify the timeout value in milliseconds for SCCB I2C communication.
+
+        config OV2640_SCCB_MAX_HZ
+            int "SCCB I2C Max Frequency (Hz)"
+            default 100000
+            range 10000 400000
+            help
+              Specify the maximum I2C bus frequency in Hz for SCCB communication.
+              Default is 100kHz (100000 Hz).
+
+    endmenu
+
+    menu "Camera configuration"
+        depends on SENSOR_USING_OV2640
+
+        config OV2640_CAMERA_READ_TIMEOUT_MS
+            int "Camera Read Timeout (ms)"
+            default 1000
+            range 100 10000
+            help
+              Specify the timeout value in milliseconds for camera read operations.
+              Default is 1000ms (1 second).
+
+        config OV2640_DVP_XCLK_PIN
+            int "XCLK Output Pin Number"
+            default -1
+            help
+              Specify the pin number for XCLK (external clock) output.
+              Set to -1 to disable XCLK output (use external clock source).
+              NOTE: User must configure this pin as GPTIM2_CH1 in main.c before opening the camera device.
+              Example: HAL_PIN_Set(PAD_PA00 + 44, GPTIM2_CH1, PIN_NOPULL, 1);
+
+        choice
+            prompt "XCLK Output Frequency"
+            default OV2640_DVP_XCLK_FREQ_12M
+            depends on OV2640_DVP_XCLK_PIN != -1
+            help
+              Select the XCLK output frequency for the OV2640 camera module.
+              GPTIM2 runs at 24MHz, so only 6MHz and 12MHz can be generated.
+
+            config OV2640_DVP_XCLK_FREQ_6M
+                bool "6 MHz"
+                help
+                  Generate 6MHz XCLK (24MHz / 4).
+
+            config OV2640_DVP_XCLK_FREQ_12M
+                bool "12 MHz"
+                help
+                  Generate 12MHz XCLK (24MHz / 2).
+        endchoice
+
+        config OV2640_DVP_XCLK_FREQ
+            int
+            default 6000000 if OV2640_DVP_XCLK_FREQ_6M
+            default 12000000 if OV2640_DVP_XCLK_FREQ_12M
+            default 0
+
+    endmenu
+
+endmenu
