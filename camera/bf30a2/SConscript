@@ -1,22 +1,14 @@
 from building import *
-import rtconfig
 import os
 
-src = []
-inc = []
-cwd = GetCurrentDir() # get current dir path
+cwd = GetCurrentDir()
 
-src=Glob('*.c')
+src = Glob(os.path.join(cwd, 'src', '*.c'))
+inc = [cwd, os.path.join(cwd, 'include')]
 
-# check if .h or .hpp files exsit
-def check_h_hpp_exsit(path):
-    file_dirs = os.listdir(path)
-    for file_dir in file_dirs:
-        if os.path.splitext(file_dir)[1] in ['.h', '.hpp']:
-            return True
-    return False
+group = DefineGroup('BF30A2',
+                    src,
+                    depend = ['PKG_USING_BF30A2'],
+                    CPPPATH = inc)
 
-inc = inc + [cwd]
-group = DefineGroup('drv_bf30a2', src, depend = ['BSP_USING_BF30A2'], CPPPATH = inc)
 Return('group')
-
