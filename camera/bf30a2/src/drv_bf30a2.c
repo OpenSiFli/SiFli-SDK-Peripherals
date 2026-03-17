@@ -2,16 +2,9 @@
  * @file    drv_bf30a2.c
  * @brief   BF30A2 SPI Camera RT-Thread Device Driver Implementation
  *
- * This file implements the RT-Thread standard device driver for the
- * BF30A2 SPI camera sensor. It provides:
- * - Standard device interface (init, open, close, read, control)
- * - Frame capture with DMA
- * - YUV to RGB565 color conversion
- * - Statistics and FPS calculation
- * - UART export functionality
  *
+ * SPDX-FileCopyrightText: 2026 SiFli Technologies(Nanjing) Co., Ltd
  * SPDX-License-Identifier: Apache-2.0
- * Copyright (c) 2024
  */
 
 /*============================================================================*/

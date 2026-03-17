@@ -2,11 +2,9 @@
  * @file    drv_bf30a2.h
  * @brief   BF30A2 SPI Camera RT-Thread Device Driver Interface
  *
- * This header provides the RT-Thread standard device driver interface
- * for the BF30A2 SPI camera sensor.
  *
+ * SPDX-FileCopyrightText: 2026 SiFli Technologies(Nanjing) Co., Ltd
  * SPDX-License-Identifier: Apache-2.0
- * Copyright (c) 2024
  */
 
 #ifndef __DRV_BF30A2_H__

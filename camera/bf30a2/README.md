@@ -13,20 +13,20 @@ CONFIG_BSP_SPI2_RX_USING_DMA=y
 CONFIG_BSP_USING_SPI_CAMERA=y
 ```
 * 此驱动的例程用到的LVGL相关宏参照lvgl_v9_examples例程进行开启，此处不再赘述，LVGL在此处仅用于展示显示到屏幕的能力，非驱动摄像头所必需。
+* 此例程使用了SiFli组件注册表，具体使用方式请参见SDK文档 `SF-PKG 使用指南`，本例程已载入bf30a2驱动，可直接编译使用。
 * 切换到工程例程的project目录运行scons命令进行代码编译：
 ```
 scons --board=sf32lb52-lcd_n16r8 -j8
 ```
 * 切换到例程`project/build_xx`目录，运行`uart_download.bat`，按提示选择端口即可进行下载：
 
->`build_sf32lb52-lcd_n16r8_hcpu\uart_download.bat`//下载代码
+>`build_sf32lb52-lcd_n16r8_hcpu\uart_download.bat`
 
 >`Uart Download`
 
 >`please input the serial port num:5`
 
-关于编译、下载的详细步骤，请参考[](/quickstart/get-started.md)的相关介绍。
-
+关于编译、下载的详细步骤，请参考SDK文档中[](/quickstart/get-started.md)的相关介绍。
 
 
 ### 硬件连接
