@@ -53,3 +53,17 @@ dkms.conf
 
 # debug information files
 *.dwo
+
+# Editor/IDE
+.vscode/
+
+# Python bytecode
+**/__pycache__/
+*.pyc
+
+# SCons
+.sconsign.dblite
+
+# Example project build outputs
+camera_framework/examples/**/project/build*/
+camera_framework/tests/**/project/build*/

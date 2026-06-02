@@ -1,0 +1,36 @@
+import os
+from building import *
+
+cwd = GetCurrentDir()
+objs = []
+
+Import('SIFLI_SDK')
+objs.extend(SConscript(os.path.join(SIFLI_SDK, 'SConscript'),
+                       variant_dir="sifli_sdk",
+                       duplicate=0))
+
+objs.extend(SConscript(cwd + '/../src/SConscript',
+                       variant_dir="src",
+                       duplicate=0))
+
+camera_root = os.path.normpath(os.path.join(cwd, '../../../'))
+camera_src = (Glob(camera_root + '/camera/*.c') +
+              Glob(camera_root + '/camera/*/*.c') +
+              Glob(camera_root + '/camera/*/*/*.c') +
+              Glob(camera_root + '/camera/*/*/*/*.c'))
+camera_inc = [
+    camera_root + '/camera',
+    camera_root + '/camera/bus/control',
+    camera_root + '/camera/driver',
+    camera_root + '/camera/driver/ov2640',
+    camera_root + '/camera/bus/data',
+    camera_root + '/camera/handle',
+]
+objs.extend(DefineGroup('CameraFramework',
+                        camera_src,
+                        depend=['CAMERA_FRAMEWORK_ENABLE'],
+                        CPPPATH=camera_inc,
+                        CPPDEFINES=['CAMERA_HANDLE_TESTING'],
+                        LIBPATH=camera_inc))
+
+Return('objs')

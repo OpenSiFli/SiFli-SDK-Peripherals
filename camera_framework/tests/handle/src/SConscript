@@ -1,0 +1,19 @@
+import os
+from building import *
+
+cwd = GetCurrentDir()
+src = Glob('*.c')
+src += [os.path.normpath(os.path.join(cwd, '../../common/camera_test.c'))]
+camera_root = os.path.normpath(os.path.join(cwd, '../../../'))
+
+group = DefineGroup('Applications',
+                    src,
+                    depend=[''],
+                    CPPPATH=[
+                        cwd,
+                        os.path.normpath(os.path.join(cwd, '../../common')),
+                        os.path.join(camera_root, 'camera/handle'),
+                    ],
+                    CPPDEFINES=['CAMERA_HANDLE_TESTING'])
+
+Return('group')

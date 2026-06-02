@@ -1,0 +1,32 @@
+import os
+from building import *
+
+cwd = GetCurrentDir()
+objs = []
+list = os.listdir(cwd)
+
+# Add SDK
+Import('SIFLI_SDK')
+objs.extend(SConscript(os.path.join(SIFLI_SDK, 'SConscript'), variant_dir="sifli_sdk", duplicate=0))
+
+# Add application source code
+objs.extend(SConscript(cwd+'/../src/SConscript', variant_dir="src", duplicate=0))
+
+# Add camera framework sources directly from the repository.
+ov2640_root = os.path.normpath(os.path.join(cwd, '../../../'))
+ov2640_src = (Glob(ov2640_root + '/camera/*.c') +
+              Glob(ov2640_root + '/camera/*/*.c') +
+              Glob(ov2640_root + '/camera/*/*/*.c') +
+              Glob(ov2640_root + '/camera/*/*/*/*.c'))
+ov2640_inc = [
+    ov2640_root + '/camera',
+    ov2640_root + '/camera/bus/control',
+    ov2640_root + '/camera/driver',
+    ov2640_root + '/camera/driver/ov2640',
+    ov2640_root + '/camera/bus/data',
+    ov2640_root + '/camera/handle',
+]
+objs.extend(DefineGroup('OV2640', ov2640_src, depend=['CAMERA_FRAMEWORK_ENABLE'],
+                         CPPPATH=ov2640_inc, LIBPATH=ov2640_inc))
+
+Return('objs')

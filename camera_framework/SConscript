@@ -1,0 +1,11 @@
+from building import *
+
+# keep current working dir
+cwd = GetCurrentDir()
+# collect sources under camera (support nested driver subdirs)
+src = Glob('./camera/*.c') + Glob('./camera/*/*.c') + Glob('./camera/*/*/*.c') + Glob('./camera/*/*/*/*.c')
+# include paths: camera root, camera/include, and specific ov2640 driver headers
+include = ['./camera', './camera/bus/control', './camera/driver', './camera/driver/ov2640', './camera/bus/data', './camera/handle']
+group = DefineGroup('Drivers', src, depend = ['CAMERA_FRAMEWORK_ENABLE'], CPPPATH = include, LIBPATH = include)
+
+Return('group')

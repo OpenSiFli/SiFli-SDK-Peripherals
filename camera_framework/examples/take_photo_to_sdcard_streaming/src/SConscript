@@ -1,0 +1,18 @@
+import os
+from building import *
+
+cwd = GetCurrentDir()
+ov2640_root = os.path.normpath(os.path.join(cwd, '../../../'))
+
+# Add source code
+src = Glob('*.c')
+inc = [
+    ov2640_root + '/camera',
+    ov2640_root + '/camera/bus/control',
+    ov2640_root + '/camera/driver/ov2640',
+    ov2640_root + '/camera/bus/data',
+    ov2640_root + '/camera/handle',
+]
+group = DefineGroup('Applications', src, depend=[''], CPPPATH=inc)
+
+Return('group')

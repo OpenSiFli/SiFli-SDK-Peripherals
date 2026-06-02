@@ -1,0 +1,177 @@
+menuconfig CAMERA_FRAMEWORK_ENABLE
+    bool "Camera drivers"
+    default y
+    help
+      Enable the camera framework, including the handle layer, sensor driver
+      selection, control-bus settings, and data-bus backend settings.
+
+if CAMERA_FRAMEWORK_ENABLE
+
+    menu "Sensor settings"
+
+        choice
+            prompt "Active camera sensor"
+            default SENSOR_USING_OV2640
+            help
+              Select the sensor driver that the camera handle layer binds to
+              at compile time. New sensor drivers should add one option here.
+
+            config SENSOR_USING_OV2640
+                bool "Use OV2640"
+                help
+                  Enable this option to use OV2640 as the active camera driver.
+        endchoice
+
+        if SENSOR_USING_OV2640
+
+        menu "OV2640 settings"
+
+            config CAMERA_READ_TIMEOUT_MS
+                int "Frame wait timeout (ms)"
+                default 1000
+                range 100 10000
+                help
+                  Timeout value in milliseconds for blocking frame wait in
+                  OV2640 single-shot capture.
+
+        endmenu
+
+        endif
+
+    endmenu
+
+    menu "SCCB settings"
+
+        config CAMERA_SCCB_I2C_BUS_NAME
+            string "I2C bus name"
+            default "i2c1"
+            help
+              RT-Thread I2C bus device name used by the camera SCCB control bus.
+
+        config CAMERA_SCCB_TIMEOUT_MS
+            int "Timeout (ms)"
+            default 1000
+            help
+              Timeout value in milliseconds for SCCB I2C transactions.
+
+        config CAMERA_SCCB_MAX_HZ
+            int "Max frequency (Hz)"
+            default 100000
+            range 10000 400000
+            help
+              Maximum I2C clock frequency used by the camera SCCB control bus.
+
+    endmenu
+
+    menu "Data bus settings"
+
+      choice
+        prompt "Active camera data bus"
+        default CAMERA_USING_DVP
+        help
+          Select the concrete data-bus backend used by the active sensor path.
+          New data-bus backends should add one option here.
+
+        config CAMERA_USING_DVP
+          bool "Use DVP"
+          help
+            Select DVP as the camera data bus backend.
+            The current OV2640 driver implementation expects DVP.
+      endchoice
+
+      if CAMERA_USING_DVP
+
+        config CAMERA_DATA_BUS_ADAPTER_NAME
+            string
+            default "dvp"
+            help
+              Internal helper symbol that resolves to the selected data bus
+              adapter name for the current backend.
+
+        config CAMERA_DVP_PINGPONG_POOL_SIZE
+            int "Ping-pong pool size (compile-time ceiling)"
+            default 10240
+            range 1024 65536
+            help
+              Size of the statically allocated ping-pong buffer pool owned by
+              the OV2640 driver. This is the hard upper limit for runtime
+              ping-pong resizing.
+
+        config CAMERA_DVP_PINGPONG_BUFFER_SIZE
+            int "Initial ping-pong size"
+            default 8192
+            range 1024 65536
+            help
+              Initial active ping-pong DMA size passed to the DVP bus.
+              Must not exceed CAMERA_DVP_PINGPONG_POOL_SIZE.
+
+        config CAMERA_DVP_PINGPONG_USE_SECTION
+            bool "Place ping-pong pool in .dvp_pingpong section"
+            default n
+            help
+              When enabled, the OV2640 driver-owned ping-pong buffer pool is
+              placed in the ".dvp_pingpong" linker section.
+
+        config CAMERA_DVP_DATA_PIN_BASE
+            int "DVP data pin base number"
+            default 0
+            help
+              Internal helper option for DVP data pin base numbering.
+              Do not modify unless you are adjusting the low-level platform port.
+
+        config CAMERA_DVP_PCLK_PIN
+            int "PCLK pin number (PAx index)"
+            default 41
+            help
+              PAx pin index for the DVP pixel clock (PCLK) input.
+              The driver muxes this pin to GPTIM1_ETR automatically.
+
+        config CAMERA_DVP_HSYNC_PIN
+            int "HSYNC pin number (PAx index)"
+            default 43
+            help
+              PAx pin index for the DVP horizontal sync (HSYNC/HREF) input.
+              The driver muxes this pin to GPTIM1_CH1 automatically.
+
+        config CAMERA_DVP_VSYNC_PIN
+            int "VSYNC pin number (PAx index)"
+            default 42
+            help
+              PAx pin index for the DVP VSYNC GPIO interrupt input.
+
+        config CAMERA_DVP_XCLK_PIN
+            int "XCLK output pin number (PAx index)"
+            default -1
+            help
+              PAx pin index for XCLK output. Set to -1 to disable XCLK output
+              and use an external clock source.
+
+        choice
+            prompt "XCLK output frequency"
+            default CAMERA_DVP_XCLK_FREQ_12M
+            depends on CAMERA_DVP_XCLK_PIN != -1
+            help
+              Select the XCLK output frequency for the OV2640 data bus path.
+
+            config CAMERA_DVP_XCLK_FREQ_6M
+                bool "6 MHz"
+                help
+                  Generate 6MHz XCLK (24MHz / 4).
+
+            config CAMERA_DVP_XCLK_FREQ_12M
+                bool "12 MHz"
+                help
+                  Generate 12MHz XCLK (24MHz / 2).
+        endchoice
+
+        config CAMERA_DVP_XCLK_FREQ
+            int
+            default 6000000 if CAMERA_DVP_XCLK_FREQ_6M
+            default 12000000 if CAMERA_DVP_XCLK_FREQ_12M
+            default 0
+
+        endif
+
+    endmenu
+
+endif
