@@ -1,0 +1,8 @@
+from building import *
+
+cwd = GetCurrentDir()
+src = Glob('*.c')
+path = [cwd]
+group = DefineGroup('Drivers', src, depend = ['SENSOR_USING_OV2640'], CPPPATH = path, LIBPATH = path)
+
+Return('group')
