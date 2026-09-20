@@ -14,7 +14,10 @@ src = (Glob('./core/*.c') +
 include = ['./core', './core/bus/control', './core/driver', './core/bus/data', './core/handle']
 
 if GetDepend('CAMERA_USING_DVP'):
-    src += ['./core/bus/data/dvp.c']
+    if GetDepend('CAMERA_DVP_BACKEND_DCMI'):
+        src += ['./core/bus/data/dcmi.c']
+    else:
+        src += ['./core/bus/data/dvp.c']
 elif GetDepend('CAMERA_USING_SERIAL'):
     src += ['./core/bus/data/camera_serial.c',
             './core/bus/data/camera_serial_decoder.c',

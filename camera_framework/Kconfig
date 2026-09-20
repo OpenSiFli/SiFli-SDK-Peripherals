@@ -149,6 +149,40 @@ if CAMERA_FRAMEWORK_ENABLE
 
         if CAMERA_USING_DVP
 
+        choice
+            prompt "DVP capture backend"
+            default CAMERA_DVP_BACKEND_DCMI if SOC_SF32LB57X
+            default CAMERA_DVP_BACKEND_GPIO
+
+            config CAMERA_DVP_BACKEND_GPIO
+                bool "GPIO and timer DMA"
+                depends on SOC_SF32LB52X || SOC_SF32LB56X
+                select BSP_USING_GPTIM1
+
+            config CAMERA_DVP_BACKEND_DCMI
+                bool "Hardware DCMI (HAL)"
+                depends on SOC_SF32LB57X && !BSP_USING_DCMI
+                help
+                  Receive parallel DVP pixels through the SDK DCMI and DMA HAL.
+                  The framework owns capture, interrupts and JPEG frame completion.
+                  The board configures D0-D7, PCLK, HREF and VSYNC pinmux in
+                  HAL_DCMI_MspInit(). Keep the SDK DCMI device driver disabled.
+                  Raw streaming uses continuous capture and circular DMA.
+                  Supply two contiguous 64-byte-aligned buffers, each exactly
+                  one image payload in size. DMA half/full events hand off buffers.
+                  Validate borrowed frames before and after copying them.
+        endchoice
+
+        config CAMERA_DCMI_PCLK_FALLING
+            bool "DCMI capture on falling PCLK edge"
+            depends on CAMERA_DVP_BACKEND_DCMI
+            default n
+            help
+              Sample DVP data on the falling pixel-clock edge. By default,
+              capture uses the rising edge.
+
+        if CAMERA_DVP_BACKEND_GPIO
+
         config CAMERA_DVP_PINGPONG_POOL_SIZE
             int "Ping-pong pool size (compile-time ceiling)"
             default 10240
@@ -201,6 +235,8 @@ if CAMERA_FRAMEWORK_ENABLE
               PAx pin index for the DVP VSYNC GPIO interrupt input.
 
         endif
+
+        endif # CAMERA_USING_DVP
 
         if CAMERA_USING_SERIAL
 

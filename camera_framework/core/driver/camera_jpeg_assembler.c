@@ -82,3 +82,118 @@ camera_jpeg_result_t camera_jpeg_assembler_feed(
 
     return CAMERA_JPEG_INCOMPLETE;
 }
+
+size_t camera_jpeg_frame_size(const uint8_t *buffer, size_t size)
+{
+    size_t offset = 2U;
+    int in_scan = 0;
+    int saw_scan = 0;
+
+    if (buffer == NULL || size < 4U || buffer[0] != 0xFFU || buffer[1] != 0xD8U)
+    {
+        return 0U;
+    }
+    while (offset < size)
+    {
+        uint8_t marker;
+        size_t segment_size;
+
+        if (in_scan)
+        {
+            while (offset < size && buffer[offset] != 0xFFU)
+            {
+                ++offset;
+            }
+        }
+        else if (buffer[offset] != 0xFFU)
+        {
+            return 0U;
+        }
+        while (offset < size && buffer[offset] == 0xFFU)
+        {
+            ++offset;
+        }
+        if (offset == size)
+        {
+            return 0U;
+        }
+        marker = buffer[offset++];
+        if (in_scan && (marker == 0x00U || (marker >= 0xD0U && marker <= 0xD7U)))
+        {
+            continue;
+        }
+        if (marker == 0xD9U)
+        {
+            return saw_scan ? offset : 0U;
+        }
+        if (marker == 0x00U || marker == 0xD8U || (marker >= 0xD0U && marker <= 0xD7U))
+        {
+            return 0U;
+        }
+        if (marker == 0x01U)
+        {
+            continue;
+        }
+        if (size - offset < 2U)
+        {
+            return 0U;
+        }
+        segment_size = ((size_t)buffer[offset] << 8) | buffer[offset + 1U];
+        if (segment_size < 2U || segment_size > size - offset)
+        {
+            return 0U;
+        }
+        offset += segment_size;
+        /* DNL may occur inside entropy data; other segments end that scan. */
+        in_scan = marker == 0xDAU || (in_scan && marker == 0xDCU);
+        if (marker == 0xDAU)
+        {
+            saw_scan = 1;
+        }
+    }
+    return 0U;
+}
+
+size_t camera_jpeg_find_frame(const uint8_t *buffer, size_t size,
+                             uint32_t frame_number, size_t *frame_offset)
+{
+    size_t offset = 0U;
+    uint32_t number = 1U;
+
+    if (frame_offset == NULL)
+    {
+        return 0U;
+    }
+    *frame_offset = 0U;
+    if (buffer == NULL || frame_number == 0U)
+    {
+        return 0U;
+    }
+    while (offset < size)
+    {
+        size_t frame_size = camera_jpeg_frame_size(buffer + offset, size - offset);
+
+        if (frame_size == 0U)
+        {
+            return 0U;
+        }
+        if (number == frame_number)
+        {
+            *frame_offset = offset;
+            return frame_size;
+        }
+        ++number;
+        offset += frame_size;
+        /* Only bytes after a complete EOI may be skipped between frames. */
+        while (size - offset >= 2U &&
+               (buffer[offset] != 0xFFU || buffer[offset + 1U] != 0xD8U))
+        {
+            ++offset;
+        }
+        if (size - offset < 2U)
+        {
+            return 0U;
+        }
+    }
+    return 0U;
+}

@@ -121,6 +121,7 @@ static int gc032a_capture_async(void *buffer,
                                 void *context);
 static int gc032a_start_stream(const camera_stream_start_args_t *args);
 static int gc032a_stop_stream(void);
+static rt_bool_t gc032a_stream_frame_is_valid(const camera_stream_frame_t *frame);
 
 const camera_device_ops_t gc032a_ops =
 {
@@ -135,6 +136,7 @@ const camera_device_ops_t gc032a_ops =
     .capture_async = gc032a_capture_async,
     .start_stream = gc032a_start_stream,
     .stop_stream = gc032a_stop_stream,
+    .is_stream_frame_valid = gc032a_stream_frame_is_valid,
 };
 
 CAMERA_DRIVER_EXPORT(gc032a, &gc032a_ops);
@@ -469,4 +471,9 @@ static int gc032a_start_stream(const camera_stream_start_args_t *args)
 static int gc032a_stop_stream(void)
 {
     return camera_sensor_runtime_stop_stream(&s_device.runtime);
+}
+
+static rt_bool_t gc032a_stream_frame_is_valid(const camera_stream_frame_t *frame)
+{
+    return camera_sensor_runtime_stream_frame_is_valid(&s_device.runtime, frame);
 }

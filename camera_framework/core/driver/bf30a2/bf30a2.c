@@ -236,7 +236,7 @@ static void frame_complete(bf30a2_device_t *dev)
 
     if (dev->stream_callback != RT_NULL)
     {
-        camera_stream_frame_t frame;
+        camera_stream_frame_t frame = {0};
 
         frame.buffer_index = dev->stream_buffer_index;
         frame.buffer = dev->frame_buffer;
@@ -943,7 +943,8 @@ static int bf30a2_start_stream(const camera_stream_start_args_t *args)
 {
     int ret;
 
-    if (args == RT_NULL || args->buffers[0] == RT_NULL ||
+    if (args == RT_NULL || args->mode != CAMERA_STREAM_MODE_FRAME ||
+        args->buffers[0] == RT_NULL ||
         args->buffers[1] == RT_NULL || args->buffer_size < BF30A2_FRAME_SIZE ||
         s_device.lock == RT_NULL)
     {

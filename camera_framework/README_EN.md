@@ -1,4 +1,4 @@
-﻿# OV2640 Camera Component
+# OV2640 Camera Component
 
 [中文](README.md) | [English](README_EN.md)
 
@@ -329,3 +329,21 @@ python jlinkbin2bmp.py "-if SWD -speed 12000" rgb565 320 240 0x20100000
 
 - Chinese version: [README.md](README.md)
 - take_photo example: [examples/take_photo/README_EN.md](examples/take_photo/README_EN.md)
+
+## SF32LB57 hardware DCMI backend
+
+Select GC032A `8-bit DVP` or OV2640 `DVP`, then choose `Hardware DCMI (HAL)` under `DVP capture backend` and disable `BSP_USING_DCMI`. This backend uses the SDK DCMI and DMA HAL directly; the framework manages capture, interrupts and JPEG frame completion. Board code configures D0-D7, PCLK, HREF and VSYNC pinmux in `HAL_DCMI_MspInit()`. SCCB and XCLK use the framework settings, and capture samples the rising PCLK edge by default.
+
+OV2640 defaults to SVGA/RGB565 with hardware DCMI and supports native sensor JPEG capture. GPIO and ArduCAM FIFO backends retain their JPEG default. The OV2640 RGB565 settings write `0x09` to the DSP `IMAGE_MODE` register, sending the low byte of each pixel first. Applications using native RGB565 on a little-endian MCU can copy these pixels directly.
+
+`camera_start_stream()` defaults to `CAMERA_STREAM_MODE_FRAME` and submits two adjacent, 64-byte-aligned frame buffers. Each frame size must also be a multiple of 64 bytes. DMA half/full completion identifies complete frames; DCMI runs continuously without per-frame stop/restart. Existing GPIO backends retain their capture path.
+
+`camera_get_stream_frame()` returns a borrowed descriptor. A negative `error` reports capture failure; `timestamp_ticks` records the RTOS tick at the frame event. Consumers perform any required DMA cache invalidation in thread context, then call `camera_stream_frame_is_valid()` before and after copying pixels to stable storage. Publish the copy only when both checks pass. In `FRAME` mode, the check covers generation and DMA source/destination progress; a queued descriptor alone does not guarantee that its pixels remain valid.
+
+Use `camera_start_stream_mode(instance, &config, CAMERA_STREAM_MODE_HALF_FRAME)` for half-frame capture. `config.buffers[0]` points to one complete raw-image buffer aligned to 64 bytes; `config.buffers[1]` must be `NULL`, `config.buffer_size` must equal the full image size, the image height must be even, and each half must contain a multiple of 64 bytes. For example, an 800 × 600 OV2640 RGB565 image uses one 960000-byte buffer, with 480000 bytes per half.
+
+DMA half transfer (HT) emits `CAMERA_STREAM_EVENT_HALF_FIRST`, and transfer completion (TC) emits `CAMERA_STREAM_EVENT_HALF_SECOND`. Both events for one image share the same `sequence`. Their `buffer` and `frame_size` always describe the full image; consumers use `event_type` to select its upper or lower half. Among successful events, only `HALF_SECOND` sets `is_complete` to true. Interrupt callbacks only enqueue metadata and wake the waiter; a normal thread uses `camera_get_stream_frame()` to consume events in FIFO order and process pixels.
+
+In `HALF_FRAME` mode, `camera_stream_frame_is_valid()` compares only the notified half's generation against the latest HT/TC state, without polling DMA progress. `HALF_FIRST` expires at its corresponding TC, and `HALF_SECOND` expires at the next HT. Stop, error and restart invalidate old descriptors. Consumers must check validity before and after processing each half and perform the required cache maintenance. Publish an assembled image only after both halves with the same `sequence` have been processed successfully. A validity check does not prevent DMA from overwriting the buffer.
+
+Failed stop/close retains state and buffer references for retry. Buffers are returned only after successful shutdown. Single-shot completion runs on the system workqueue after hardware has stopped.
