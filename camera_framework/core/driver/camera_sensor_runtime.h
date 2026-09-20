@@ -11,6 +11,8 @@ typedef struct
     rt_size_t buffer_size;
     rt_uint8_t active_buffer_index;
     rt_uint32_t sequence;
+    rt_bool_t native_mode;
+    camera_stream_mode_t mode;
     camera_stream_frame_callback_t frame_callback;
     void *callback_context;
 } camera_sensor_stream_t;
@@ -56,6 +58,15 @@ int camera_sensor_runtime_set_framesize(camera_sensor_runtime_t *runtime,
 rt_size_t camera_sensor_runtime_capture(camera_sensor_runtime_t *runtime,
                                         void *buffer,
                                         rt_size_t size);
+rt_size_t camera_sensor_runtime_capture_timeout(camera_sensor_runtime_t *runtime,
+                                                void *buffer,
+                                                rt_size_t size,
+                                                uint32_t timeout_ms);
+rt_size_t camera_sensor_runtime_capture_frames_timeout(camera_sensor_runtime_t *runtime,
+                                                       void *buffer,
+                                                       rt_size_t size,
+                                                       uint32_t frame_count,
+                                                       uint32_t timeout_ms);
 int camera_sensor_runtime_capture_async(camera_sensor_runtime_t *runtime,
                                         void *buffer,
                                         rt_size_t size,
@@ -64,6 +75,8 @@ int camera_sensor_runtime_capture_async(camera_sensor_runtime_t *runtime,
 int camera_sensor_runtime_start_stream(camera_sensor_runtime_t *runtime,
                                        const camera_stream_start_args_t *args);
 int camera_sensor_runtime_stop_stream(camera_sensor_runtime_t *runtime);
+rt_bool_t camera_sensor_runtime_stream_frame_is_valid(
+    camera_sensor_runtime_t *runtime, const camera_stream_frame_t *frame);
 int camera_sensor_get_resolution(framesize_t framesize,
                                  uint16_t *width,
                                  uint16_t *height);

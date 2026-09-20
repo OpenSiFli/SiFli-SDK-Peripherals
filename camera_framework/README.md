@@ -1,4 +1,4 @@
-﻿# Camera 框架说明
+# Camera 框架说明
 
 [English](README_EN.md)
 
@@ -173,3 +173,21 @@ camera_deinit(&cam);
 - JPEG 保存到 SD 卡：`examples/take_photo_to_sdcard/README.md`
 - JPEG 流式保存到 SD 卡：`examples/take_photo_to_sdcard_streaming/README.md`
 - 测试说明：`tests/README.md`
+
+## SF32LB57 硬件 DCMI 后端
+
+GC032A 选择 `8-bit DVP`，或 OV2640 选择 `DVP`，再在 `DVP capture backend` 中选择 `Hardware DCMI (HAL)`，关闭 `BSP_USING_DCMI`。此后端直接使用 SDK 的 DCMI 和 DMA HAL，由框架管理采集、中断和 JPEG 帧收尾。板级代码通过 `HAL_DCMI_MspInit()` 配置 D0-D7、PCLK、HREF 和 VSYNC 的引脚复用；SCCB 和 XCLK 沿用框架配置，默认在 PCLK 上升沿采样。
+
+OV2640 在硬件 DCMI 后端下默认使用 SVGA/RGB565，并支持传感器原生 JPEG 拍照。GPIO 和 ArduCAM FIFO 后端仍使用 JPEG 默认配置。OV2640 的 RGB565 设置将 DSP 寄存器 `IMAGE_MODE` 写为 `0x09`，使每个像素的低字节先输出；在小端 MCU 上按原生 RGB565 使用时，直接复制像素即可。
+
+`camera_start_stream()` 默认使用 `CAMERA_STREAM_MODE_FRAME`，一次提交两块相邻、64 字节对齐的帧缓冲，单帧大小也须为 64 字节的整数倍。DMA 半传输和全传输通知分别对应两个完整帧，后端不会逐帧停止和重新启动 DCMI。框架保留旧 GPIO 后端的采集流程。
+
+`camera_get_stream_frame()` 返回借用帧描述符。`error` 为负值表示采集失败，`timestamp_ticks` 记录帧事件的 RTOS tick。后端支持 `camera_stream_frame_is_valid()`：消费者在线程中对 DMA 帧执行必要的缓存失效，再于复制前后调用有效性查询；只有两次均有效，复制结果才可以交给显示或编码使用。在 `FRAME` 模式下，该查询检查采集序号和 DMA 的源读取、目标写入进度；队列中的旧描述符不能作为像素仍有效的依据。
+
+半帧采集使用 `camera_start_stream_mode(instance, &config, CAMERA_STREAM_MODE_HALF_FRAME)`。`config.buffers[0]` 指向一块 64 字节对齐的完整原始图像缓冲，`config.buffers[1]` 必须为 `NULL`，`config.buffer_size` 必须等于整帧字节数，图像高度必须为偶数，每半幅字节数也须为 64 字节的整数倍。例如，OV2640 的 800 × 600 RGB565 图像使用一块 960000 字节缓冲，每半幅为 480000 字节。
+
+DMA 半传输（HT）产生 `CAMERA_STREAM_EVENT_HALF_FIRST`，全传输（TC）产生 `CAMERA_STREAM_EVENT_HALF_SECOND`；同一帧的两个事件具有相同的 `sequence`。两个描述符的 `buffer` 和 `frame_size` 始终指向完整图像，消费者根据 `event_type` 选择上半幅或下半幅；成功事件中仅 `HALF_SECOND` 的 `is_complete` 为真。中断回调只入队元数据并唤醒等待者，普通线程通过 `camera_get_stream_frame()` 按 FIFO 顺序消费事件并处理像素。
+
+在 `HALF_FRAME` 模式下，`camera_stream_frame_is_valid()` 只比较事件所指半幅的最新 HT/TC 代次，不轮询 DMA 进度。`HALF_FIRST` 在对应 TC 到来时失效，`HALF_SECOND` 在下一次 HT 到来时失效；停止、错误和重新启动会使旧描述符失效。消费者处理每个半幅前后均须检查有效性，并完成所需缓存维护；只有同一 `sequence` 的两半都处理成功，才可发布拼接后的完整图像。有效性查询不会阻止 DMA 重写缓冲。
+
+停止或关闭失败时，框架保留相应状态和缓冲引用，调用者可重试停止或关闭；仅成功后归还缓冲。单拍完成通知经系统工作队列执行，并在硬件停止后发出。

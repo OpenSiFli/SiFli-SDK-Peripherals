@@ -91,9 +91,25 @@ typedef struct
   rt_size_t          max_buffer_size;/* worst-case bytes for one raw frame */
 } camera_capabilities_t;
 
-/* Frame descriptor passed to consumers via callbacks or dequeue APIs. This
- * structure is part of the public contract: applications receive a shallow
- * copy and must not free the underlying buffer (driver owns DMA buffers). */
+typedef enum
+{
+  CAMERA_STREAM_MODE_FRAME = 0,
+  CAMERA_STREAM_MODE_HALF_FRAME,
+} camera_stream_mode_t;
+
+typedef enum
+{
+  CAMERA_STREAM_EVENT_FRAME = 0,
+  CAMERA_STREAM_EVENT_HALF_FIRST,
+  CAMERA_STREAM_EVENT_HALF_SECOND,
+} camera_stream_event_type_t;
+
+/* Stream events borrow caller-owned DMA memory, which must stay allocated
+ * until a successful stop. FRAME describes one completed image. HALF_FIRST
+ * and HALF_SECOND both describe the same full image buffer; event_type selects
+ * its upper or lower half, and is_complete is true only for HALF_SECOND.
+ * DMA keeps running while events are consumed. Cache maintenance remains the
+ * caller's responsibility before CPU access. */
 typedef struct
 {
   void *buffer;
@@ -102,6 +118,9 @@ typedef struct
   rt_uint32_t sequence;
   rt_uint8_t buffer_index;
   rt_bool_t is_complete;
+  rt_err_t error; /* zero for data; negative capture error may have no buffer */
+  rt_uint32_t timestamp_ticks; /* capture event tick; zero if unavailable */
+  camera_stream_event_type_t event_type;
 } camera_stream_frame_t;
 
 typedef void (*camera_stream_frame_callback_t)(void *context,
@@ -165,6 +184,43 @@ camera_handle_status_t camera_capture_single(camera_handler_instance_t *instance
                                              camera_capture_request_t *request);
 
 /**
+ * @brief Blocking single-shot capture with a per-request wait timeout.
+ *
+ * The timeout bounds the frame wait. On every return, call camera_stop_capture
+ * successfully before changing settings or reusing/freeing the destination.
+ */
+camera_handle_status_t camera_capture_single_timeout(camera_handler_instance_t *instance,
+                                                     camera_capture_request_t *request,
+                                                     uint32_t timeout_ms);
+
+/**
+ * @brief Receive a bounded continuous JPEG sequence and retain its final frame.
+ *
+ * frame_count must be at least one. The backend starts hardware once, receives
+ * the requested consecutive frames and places the final JPEG at request->buffer.
+ * buffer_size is the total capture storage capacity. Unsupported backends fail;
+ * this operation never falls back to repeated single-shot captures.
+ * timeout_ms bounds the whole frame wait. On every return, camera_stop_capture
+ * must succeed before changing settings or reusing/freeing the destination.
+ */
+camera_handle_status_t camera_capture_frames_timeout(camera_handler_instance_t *instance,
+                                                     camera_capture_request_t *request,
+                                                     uint32_t frame_count,
+                                                     uint32_t timeout_ms);
+
+/**
+ * @brief Stop a synchronous capture and check that callbacks are idle.
+ *
+ * This call may wait for the framework API mutex.
+ * CAMERA_OK means the backend stop succeeded. Reusing the destination also
+ * requires a backend that confirms hardware and callback retirement, as DCMI
+ * does. CAMERA_ERRORRESOURCE can mean a completion callback is still returning;
+ * retry from another task after yielding. Any failure retains ownership.
+ * Async capture and active streams must use their own lifecycle APIs.
+ */
+camera_handle_status_t camera_stop_capture(camera_handler_instance_t *instance);
+
+/**
  * @brief Start a non-blocking single-shot capture.
  *
  * Conflicting capture, configuration, stream-start and deinit operations
@@ -176,21 +232,54 @@ camera_handle_status_t camera_capture_single_async(
     camera_capture_done_callback_t     callback,
     void                              *context);
 
-/** @brief Start continuous stream with two DMA buffers. */
+/** @brief Start continuous full-frame streaming with two DMA buffers. */
 camera_handle_status_t camera_start_stream(camera_handler_instance_t *instance,
                                            const camera_stream_config_t *config);
+
+/**
+ * @brief Start a stream with complete-frame or half-frame notifications.
+ *
+ * HALF_FRAME uses buffers[0] as one complete raw-image buffer, buffers[1] must
+ * be NULL, and buffer_size must equal the image size. The image height must be
+ * even. Each HT/TC notification retains the full image address and size.
+ * Unsupported backends or formats reject HALF_FRAME.
+ */
+camera_handle_status_t camera_start_stream_mode(camera_handler_instance_t *instance,
+                                                const camera_stream_config_t *config,
+                                                camera_stream_mode_t mode);
 
 /** @brief Dequeue next stream frame, waiting up to @p timeout ticks. */
 camera_handle_status_t camera_get_stream_frame(camera_handler_instance_t *instance,
                                                camera_stream_frame_t *frame,
                                                rt_int32_t timeout);
 
-/** @brief Stop stream and clear queue state. */
+/**
+ * @brief Test whether a native stream frame still names a readable generation.
+ *
+ * Returns RT_FALSE for stale/error events, an inactive stream, ISR callers, or
+ * a backend without this operation. In HALF_FRAME mode this compares the
+ * notified half's sequence with the latest HT/TC state: HALF_FIRST expires at
+ * TC, and HALF_SECOND expires at the following HT. It does not poll DMA.
+ * A true result does not reserve memory or make its CPU cache coherent.
+ */
+rt_bool_t camera_stream_frame_is_valid(camera_handler_instance_t *instance,
+                                       const camera_stream_frame_t *frame);
+
+/** @brief Stop stream and clear queue state after the driver confirms success. */
 camera_handle_status_t camera_stop_stream(camera_handler_instance_t *instance);
 
 /** @brief Apply pixformat/framesize/quality and cache active config. */
 camera_handle_status_t camera_change_settings(camera_handler_instance_t *instance,
                                               const camera_capture_config_t *config);
+
+/**
+ * @brief Set sensor output rotation to 0 or 180 degrees while capture is stopped.
+ *
+ * Returns CAMERA_ERRORRESOURCE for active streaming/async capture or a driver
+ * without this optional operation. Reapply after reopening or changing settings.
+ */
+camera_handle_status_t camera_set_rotation(camera_handler_instance_t *instance,
+                                           uint16_t degrees);
 
 /** @brief Read the total number of dropped stream frames since last start. */
 camera_handle_status_t camera_get_stream_dropped_count(
