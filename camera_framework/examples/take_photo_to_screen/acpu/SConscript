@@ -1,0 +1,28 @@
+import os
+from building import *
+
+cwd = GetCurrentDir()
+objects = []
+
+Import('SIFLI_SDK', 'CAMERA_SOFTWARE_ROOT', 'CAMERA_ISP_ROOT',
+       'CAMERA_JPEG_ROOT')
+Import('CAMERA_SW_ISP_RUN_ON_ACPU', 'CAMERA_SW_JPEG_RUN_ON_ACPU',
+       'CAMERA_SW_JPEG_ENCODER', 'CAMERA_SW_JPEG_DECODER')
+Export('CAMERA_SW_ISP_RUN_ON_ACPU', 'CAMERA_SW_JPEG_RUN_ON_ACPU',
+       'CAMERA_SW_JPEG_ENCODER', 'CAMERA_SW_JPEG_DECODER')
+
+objects.extend(SConscript(
+    os.path.join(CAMERA_SOFTWARE_ROOT, 'example/acpu/acpu/SConscript'),
+    variant_dir='camera_sw_acpu_worker', duplicate=0))
+
+if CAMERA_SW_ISP_RUN_ON_ACPU:
+    objects.extend(SConscript(os.path.join(CAMERA_ISP_ROOT, 'SConscript'),
+                              variant_dir='camera_sw_isp', duplicate=0))
+if CAMERA_SW_JPEG_RUN_ON_ACPU:
+    objects.extend(SConscript(os.path.join(CAMERA_JPEG_ROOT, 'SConscript'),
+                              variant_dir='camera_sw_jpeg', duplicate=0))
+
+objects.extend(SConscript(os.path.join(SIFLI_SDK, 'SConscript'),
+                          variant_dir='sifli_sdk', duplicate=0))
+
+Return('objects')

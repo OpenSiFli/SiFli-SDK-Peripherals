@@ -1,0 +1,6 @@
+import os
+
+SIFLI_SDK = os.getenv('SIFLI_SDK')
+TARGET_NAME = 'acpu'
+CORE = 'ACPU'
+CHIP = 'SF32LB57X'

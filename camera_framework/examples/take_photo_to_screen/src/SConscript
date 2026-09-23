@@ -1,0 +1,45 @@
+import os
+from building import *
+
+Import('SIFLI_SDK', 'CAMERA_SOFTWARE_ROOT')
+Import('CAMERA_SW_ISP_RUN_ON_HCPU', 'CAMERA_SW_ISP_RUN_ON_ACPU',
+       'CAMERA_SW_JPEG_RUN_ON_HCPU', 'CAMERA_SW_JPEG_RUN_ON_ACPU')
+
+CAMERA_FRAMEWORK_ROOT = os.path.normpath(os.path.join(GetCurrentDir(), '../../..'))
+
+# Add source code
+display_src = Glob('display/*.c')
+app_src = Glob('app/*.c', exclude=[
+    'app/camera_isp_compare.c',
+    'app/camera_isp_config.c',
+    'app/camera_isp_mode.c',
+    'app/camera_sensor_awb_guard.c',
+])
+
+camera_src = [
+    'camera/frame_pool.c',
+    'camera/jpeg_info.c',
+]
+
+# Photo capture to the SD card: elm filesystem, the software JPEG encoder and
+# the shutter key. The input sources need the button library, and both parts
+# need a carrier whose SDMMC pads are free of the camera and the panel.
+storage_src = Glob('storage/*.c')
+input_src = Glob('input/*.c') if GetDepend('USING_BUTTON_LIB') else []
+
+src = (Glob('*.c') + app_src + Glob('image_processing/*.c') + camera_src +
+       display_src + storage_src + input_src)
+# The HCPU side of the ACPU camera pipeline stays project-local.
+if CAMERA_SW_ISP_RUN_ON_ACPU or CAMERA_SW_JPEG_RUN_ON_ACPU:
+    src += SConscript(
+        os.path.join(CAMERA_SOFTWARE_ROOT, 'example/acpu/hcpu/SConscript'),
+        variant_dir='camera_sw_acpu_hcpu', duplicate=0)
+acpu_ctrl_dir = os.path.join(SIFLI_SDK, 'middleware/acpu_ctrl')
+acpu_client_dir = os.path.join(CAMERA_SOFTWARE_ROOT, 'example/acpu/include')
+isp_include_dir = os.path.join(CAMERA_FRAMEWORK_ROOT, 'software/isp/include')
+jpeg_include_dir = os.path.join(CAMERA_FRAMEWORK_ROOT, 'software/jpeg/include')
+group = DefineGroup('Applications', src, depend = [''],
+                    CPPPATH=[acpu_ctrl_dir, acpu_client_dir, isp_include_dir,
+                             jpeg_include_dir])
+
+Return('group')
