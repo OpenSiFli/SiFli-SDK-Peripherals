@@ -1,0 +1,16 @@
+# SPDX-License-Identifier: MIT
+import os
+from building import *
+
+Import('SIFLI_SDK', 'CAMERA_ISP_ROOT', 'CAMERA_JPEG_ROOT')
+
+cwd = GetCurrentDir()
+group = DefineGroup(
+    'Camera Software ACPU Client',
+    ['camera_sw_acpu_client.c', 'camera_sw_acpu_run_task.c'],
+    depend=[''],
+    CPPPATH=[os.path.join(cwd, '../include'),
+             os.path.join(CAMERA_ISP_ROOT, 'include'),
+             os.path.join(CAMERA_JPEG_ROOT, 'include'),
+             os.path.join(SIFLI_SDK, 'middleware/acpu_ctrl')])
+Return('group')

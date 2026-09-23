@@ -103,10 +103,11 @@ static const gc032a_hw_config_t s_hw_config =
         .frame_timeout_ms = CAMERA_READ_TIMEOUT_MS,
         .default_config = &s_default_config,
     },
-#if defined(CAMERA_GC032A_INTERFACE_SERIAL_2BIT)
+#if defined(CAMERA_GC032A_INTERFACE_SERIAL_2BIT) && \
+    !defined(CAMERA_SERIAL_SPI_2BIT)
     .xclk_frequency_hz = 6000000U,
 #else
-    .xclk_frequency_hz = 12000000U,
+    .xclk_frequency_hz = 24000000U,
 #endif
 };
 

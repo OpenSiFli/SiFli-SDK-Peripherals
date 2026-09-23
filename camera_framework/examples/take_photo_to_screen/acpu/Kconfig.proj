@@ -1,0 +1,15 @@
+config BF0_HCPU
+    bool
+    default y
+
+config BF0_ACPU
+    bool
+    default y
+
+config CUSTOM_MEM_MAP
+    bool
+    select custom_mem_map
+    default y
+
+# ACPU and HCPU exchange camera buffers through shared PSRAM.  Keep this
+# region write-through so an ACPU task cannot observe stale cache lines.

@@ -1,4 +1,4 @@
-﻿# Camera Framework Tests
+# Camera Framework Tests
 
 ## Layout
 
@@ -22,7 +22,7 @@ run_camera_sensor_smoke
 
 `run_camera_handle_tests` exercises the handle API with fake sensor operations.
 `run_camera_sensor_smoke` opens the sensor selected in Kconfig and captures one
-real frame. For GC032A 2-bit serial wiring, see
+real frame. For GC032A 2-bit SPI wiring, see
 `examples/take_photo_to_sdcard/README_EN.md`; the handle and SD-card examples
 use the same GPIO-DMA pins.
 

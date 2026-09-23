@@ -27,6 +27,18 @@
 #define DCMI_STREAM_STACK_SIZE 2048U
 #define DCMI_STREAM_PRIORITY 19U
 
+#if defined(CAMERA_SERIAL_SPI_2BIT)
+#define CAMERA_DCMI_SERIAL_2BIT 1
+#define CAMERA_DCMI_IF_SPI        1U /* DCMI_CR.IF_SEL: serial packets */
+#define CAMERA_DCMI_SPI_2LINE     2U /* __HAL_DCMI_SPI_DATA_LINE halves it */
+#define CAMERA_DCMI_PACKET_SIZE   CAMERA_SERIAL_SPI_PACKET_SIZE
+#define CAMERA_DCMI_PACKET_IDS    CAMERA_SERIAL_SPI_PACKET_IDS
+#define CAMERA_DCMI_SYNC_WORD     CAMERA_SERIAL_SPI_SYNC_WORD
+#define CAMERA_DCMI_IF_SEL        CAMERA_DCMI_IF_SPI
+#else
+#define CAMERA_DCMI_IF_SEL        0U /* DCMI_CR.IF_SEL: parallel DVP */
+#endif
+
 typedef struct
 {
     DCMI_HandleTypeDef handle;
@@ -165,9 +177,31 @@ static int camera_dcmi_buffer_valid(const void *buffer, uint32_t size)
 
 static int camera_dcmi_mode_valid(bus_capture_mode_t mode)
 {
+#if defined(CAMERA_DCMI_SERIAL_2BIT)
+    if (mode == BUS_CAPTURE_MODE_JPEG)
+        return 0;
+#endif
     return mode == BUS_CAPTURE_MODE_RGB565 ||
            mode == BUS_CAPTURE_MODE_YUV422 || mode == BUS_CAPTURE_MODE_RAW ||
            mode == BUS_CAPTURE_MODE_JPEG;
+}
+
+/* Pixel clock edge used for capture. The DCMI shares the CR PCKPOL bit between
+ * the parallel clock polarity and the serial clock edge, so one setting drives
+ * both backends. */
+static uint32_t camera_dcmi_clock_polarity(void)
+{
+#if defined(CAMERA_DCMI_SERIAL_2BIT)
+#if defined(CAMERA_SERIAL_SPI_SAMPLE_FALLING)
+    return DCMI_PCKPOLARITY_FALLING;
+#else
+    return DCMI_PCKPOLARITY_RISING;
+#endif
+#elif defined(CAMERA_DCMI_PCLK_FALLING)
+    return DCMI_PCKPOLARITY_FALLING;
+#else
+    return DCMI_PCKPOLARITY_RISING;
+#endif
 }
 
 static int camera_dcmi_stop_transfer_locked(camera_dcmi_t *dcmi)
@@ -453,13 +487,40 @@ static int camera_dcmi_hw_init(camera_dcmi_t *dcmi)
 
     hardware->handle.Instance = hwp_dcmi;
     hardware->handle.Init.SynchroMode = DCMI_SYNCHRO_HARDWARE;
-    hardware->handle.Init.PCKPolarity = DCMI_PCKPOLARITY_RISING;
+    hardware->handle.Init.PCKPolarity = camera_dcmi_clock_polarity();
+#if defined(CAMERA_DCMI_SERIAL_2BIT)
+    /* The SPI packet mode syncs on the markers in the data stream, so the
+     * VSYNC/HSYNC polarity is unused. Keep the SDK's own values. */
+    hardware->handle.Init.VSPolarity = DCMI_VSPOLARITY_LOW;
+    hardware->handle.Init.HSPolarity = DCMI_HSPOLARITY_HIGH;
+#else
     hardware->handle.Init.VSPolarity = DCMI_VSPOLARITY_HIGH;
     hardware->handle.Init.HSPolarity = DCMI_HSPOLARITY_HIGH;
+#endif
     hardware->handle.Init.ExtendedDataMode = DCMI_EXTEND_DATA_8B;
     __HAL_LINKDMA(&hardware->handle, DMA_Handle, hardware->hdma);
     if (HAL_DCMI_Init(&hardware->handle) != HAL_OK)
         return -RT_EIO;
+#if defined(CAMERA_DCMI_SERIAL_2BIT)
+    /* SPI packet mode, as programmed by the SDK's rt_hw_dcmi_spi_config(). */
+    __HAL_DCMI_TRS_IF(&hardware->handle, CAMERA_DCMI_IF_SEL);
+    __HAL_DCMI_SPI_PACKET_SIZE(&hardware->handle, CAMERA_DCMI_PACKET_SIZE);
+    __HAL_DCMI_SPI_DATA_LINE(&hardware->handle, CAMERA_DCMI_SPI_2LINE);
+    __HAL_DCMI_SPI_IS_MTKMODE(&hardware->handle, 1);
+    __HAL_DCMI_SPI_PACKTID(&hardware->handle, CAMERA_DCMI_PACKET_IDS);
+#if defined(CAMERA_SERIAL_SPI_SAMPLE_FALLING)
+    __HAL_DCMI_SPI_CLKEG(&hardware->handle, 1U);
+#else
+    __HAL_DCMI_SPI_CLKEG(&hardware->handle, 0U);
+#endif
+    __HAL_DCMI_SPI_SYNC(&hardware->handle, CAMERA_DCMI_SYNC_WORD);
+    /* Wrong-order wires are corrected here instead of on the flex. */
+#if defined(CAMERA_SERIAL_SPI_DI_SWAP)
+    hardware->handle.Instance->SPI_CR |= DCMI_SPI_CR_DI_SWAP;
+#else
+    hardware->handle.Instance->SPI_CR &= ~DCMI_SPI_CR_DI_SWAP;
+#endif
+#endif
     hardware->handle.Instance->IE = 0U;
     hardware->hdma.Init.Request = DCMI_DMA_REQUEST;
     hardware->hdma.Init.Direction = DMA_PERIPH_TO_MEMORY;
@@ -645,14 +706,14 @@ static int camera_dcmi_prepare_locked(camera_dcmi_t *dcmi, uint8_t *buffer,
     if ((hardware->handle.Instance->CR & DCMI_CR_CAPTURE) != 0U)
         return -RT_EBUSY;
     hardware->handle.Init.HSPolarity = DCMI_HSPOLARITY_HIGH;
-    hardware->handle.Init.VSPolarity = DCMI_VSPOLARITY_HIGH;
-#ifdef CAMERA_DCMI_PCLK_FALLING
-    hardware->handle.Init.PCKPolarity = DCMI_PCKPOLARITY_FALLING;
+#if defined(CAMERA_DCMI_SERIAL_2BIT)
+    hardware->handle.Init.VSPolarity = DCMI_VSPOLARITY_LOW;
 #else
-    hardware->handle.Init.PCKPolarity = DCMI_PCKPOLARITY_RISING;
+    hardware->handle.Init.VSPolarity = DCMI_VSPOLARITY_HIGH;
 #endif
+    hardware->handle.Init.PCKPolarity = camera_dcmi_clock_polarity();
     hardware->handle.Instance->IE = 0U;
-    __HAL_DCMI_TRS_IF(&hardware->handle, 0U);
+    __HAL_DCMI_TRS_IF(&hardware->handle, CAMERA_DCMI_IF_SEL);
     __HAL_DCMI_CAP_MODE(&hardware->handle, stream ? 0U : 1U);
     __HAL_DCMI_YUV2RGB_DISABLE(&hardware->handle);
     hardware->frame_buffer = buffer;
@@ -663,8 +724,14 @@ static int camera_dcmi_prepare_locked(camera_dcmi_t *dcmi, uint8_t *buffer,
                                    hardware->handle.Init.PCKPolarity;
     if (dcmi->mode == BUS_CAPTURE_MODE_JPEG)
         hardware->handle.Instance->CR |= DCMI_CR_JPEG;
+#if defined(CAMERA_DCMI_SERIAL_2BIT)
+    /* The SPI 2-bit path leaves the DCMI request watermark at its reset value,
+     * exactly like the SDK driver does: a packet is a whole line of payload,
+     * so a transfer can never be left waiting for a partial FIFO tail. */
+#else
     /* JPEG ends at an arbitrary word; avoid requiring a 16-word FIFO tail. */
     hardware->handle.Instance->DMA_CR = dcmi->mode == BUS_CAPTURE_MODE_JPEG ? 1U : 16U;
+#endif
     /* GPDMA encodes single-word/16-word bursts as 0/3. Single-word JPEG
      * reads must keep the peripheral address fixed at the DCMI data port. */
     hardware->hdma.Init.BurstSize = dcmi->mode == BUS_CAPTURE_MODE_JPEG ? 0U : 3U;
@@ -1236,7 +1303,13 @@ static const bus_adapter_ops_t s_dcmi_ops =
 static bus_adapter_t s_dcmi_adapter =
 {
     .name = CAMERA_DATA_BUS_ADAPTER_NAME,
+#if defined(CAMERA_DCMI_SERIAL_2BIT)
+    /* A 2-bit SPI sensor is registered under the generic "spi" bus type so
+     * drivers pick this adapter with their 2-bit SPI configuration. */
+    .type = BUS_TYPE_SPI,
+#else
     .type = BUS_TYPE_DVP,
+#endif
     .ops = &s_dcmi_ops,
     .priv = &s_dcmi,
 };
