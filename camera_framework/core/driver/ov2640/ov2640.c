@@ -14,6 +14,10 @@
 #include "../camera_driver_desc.h"
 #include "ov2640_regs.h"
 #include "ov2640_settings.h"
+#if defined(CAMERA_USING_ARDUCAM_FIFO)
+/* Sensor-side JPEG tables for the ArduCAM SPI FIFO module. */
+#include "ov2640_arducam_settings.h"
+#endif
 #include "camera_xclk.h"
 #include "bf0_hal.h"
 #include "rtthread.h"
@@ -28,13 +32,25 @@ static sensor_device_t  s_device;
 
 static const pixformat_t g_camera_pixformats[] = {
     PIXFORMAT_JPEG,
+#if defined(CAMERA_USING_ARDUCAM_FIFO)
+    /* The FIFO module carries the OV2640's JPEG output only: it neither exposes
+     * the sensor's parallel path nor accepts a per-register RGB565 profile.
+     * Report JPEG alone so a caller cannot ask for something the module cannot
+     * deliver. */
+#else
     PIXFORMAT_RGB565,
-#if !defined(CAMERA_USING_ARDUCAM_FIFO)
     PIXFORMAT_YUV422,
 #endif
 };
 
 static const framesize_t g_camera_framesizes[] = {
+#if defined(CAMERA_USING_ARDUCAM_FIFO)
+    /* The module knows two JPEG modes: 640x480 for preview and 1600x1200 for
+     * stills. Each one is a complete register table, see
+     * sensor_set_framesize(). */
+    FRAMESIZE_VGA,
+    FRAMESIZE_UXGA,
+#else
     FRAMESIZE_96X96,
     FRAMESIZE_QQVGA,
     FRAMESIZE_128X128,
@@ -51,6 +67,7 @@ static const framesize_t g_camera_framesizes[] = {
     FRAMESIZE_HD,
     FRAMESIZE_SXGA,
     FRAMESIZE_UXGA,
+#endif /* CAMERA_USING_ARDUCAM_FIFO */
 };
 
 static const camera_capabilities_t g_camera_caps = {
@@ -169,6 +186,9 @@ typedef enum {
     ASPECT_RATIO_9X16
 } aspect_ratio_t;
 
+#if !defined(CAMERA_USING_ARDUCAM_FIFO)
+/* Crop/scale tables for the direct-sensor paths. The ArduCAM module uploads one
+ * complete JPEG table per resolution instead (see sensor_set_framesize()). */
 static const aspect_ratio_t s_aspect_ratios[FRAMESIZE_INVALID] = {
     ASPECT_RATIO_1X1,  /* 96x96 */
     ASPECT_RATIO_4X3,  /* QQVGA */
@@ -187,6 +207,7 @@ static const aspect_ratio_t s_aspect_ratios[FRAMESIZE_INVALID] = {
     ASPECT_RATIO_5X4,  /* SXGA  */
     ASPECT_RATIO_4X3,  /* UXGA  */
 };
+#endif /* CAMERA_USING_ARDUCAM_FIFO */
 
 
 
@@ -217,12 +238,6 @@ static int sensor_write_raw(uint8_t reg, uint8_t data)
 
         LOG_E("SCCB write failed: bank=%02x reg=%02x val=%02x rc=%d",
               bank, reg, data, ret);
-#if defined(SOC_SF32LB57X) && defined(CAMERA_DVP_BACKEND_DCMI)
-        LOG_E("XCLK at failure: cr1=%08x ccer=%08x psc=%u arr=%u ccr1=%u",
-              (unsigned int)hwp_gptim2->CR1, (unsigned int)hwp_gptim2->CCER,
-              (unsigned int)hwp_gptim2->PSC, (unsigned int)hwp_gptim2->ARR,
-              (unsigned int)hwp_gptim2->CCR1);
-#endif
         sensor_reset_bank_state();
         return ret;
     }
@@ -298,9 +313,46 @@ static int sensor_read_reg(ov2640_bank_t bank, uint8_t reg, uint8_t *data)
 }
 
 
+#if defined(CAMERA_USING_ARDUCAM_FIFO)
+/*
+ * Write one ArduCAM JPEG table. These tables select their own register bank and
+ * end with {0xFF, 0xFF} instead of the {0x00, 0x00} terminator expected by
+ * sensor_write_regs(), so they need their own walker.
+ */
+static int sensor_write_arducam_table(const arducam_sensor_reg_t *table)
+{
+    rt_size_t index;
+    int ret = RT_EOK;
+
+    for (index = 0U; !((table[index].reg == 0xFFU) &&
+                       (table[index].value == 0xFFU)); index++)
+    {
+        ret = sensor_write_raw(table[index].reg, table[index].value);
+        if (ret != RT_EOK)
+        {
+            break;
+        }
+    }
+    /* The tables switch banks themselves, so the cached bank is stale. */
+    if (s_active_device != RT_NULL)
+        s_active_device->current_bank = (rt_uint8_t)BANK_MAX;
+    return ret;
+}
+#endif /* CAMERA_USING_ARDUCAM_FIFO */
+
 /** @brief Reset OV2640 and load the selected initialization profile. */
 static int sensor_reset(void)
 {
+#if defined(CAMERA_USING_ARDUCAM_FIFO)
+    int ret = sensor_write_reg(BANK_SENSOR, COM7, COM7_SRST);
+
+    if (ret != RT_EOK)
+    {
+        return ret;
+    }
+    rt_thread_mdelay(100);
+    return RT_EOK;
+#else
     int ret = sensor_write_reg(BANK_SENSOR, COM7, COM7_SRST);
 
     if (ret != RT_EOK)
@@ -309,6 +361,7 @@ static int sensor_reset(void)
     }
     rt_thread_mdelay(10);
     return sensor_write_regs(ov2640_settings_cif);
+#endif /* CAMERA_USING_ARDUCAM_FIFO */
 }
 
 /** @brief Read the initial sensor status after initialization. */
@@ -336,6 +389,12 @@ static int sensor_set_pixformat(sensor_device_t *dev, pixformat_t pixformat)
 {
     (void)dev;
 
+#if defined(CAMERA_USING_ARDUCAM_FIFO)
+    /* The module only carries JPEG. Its sensor tables are written once by
+     * sensor_init() and again by every sensor_set_framesize() call, so there is
+     * nothing left to rewrite here. */
+    return pixformat == PIXFORMAT_JPEG ? RT_EOK : -RT_EINVAL;
+#else
     switch (pixformat)
     {
         case PIXFORMAT_RGB565:
@@ -349,8 +408,10 @@ static int sensor_set_pixformat(sensor_device_t *dev, pixformat_t pixformat)
         default:
             return -RT_EINVAL;
     }
+#endif /* CAMERA_USING_ARDUCAM_FIFO */
 }
 
+#if !defined(CAMERA_USING_ARDUCAM_FIFO)
 /** @brief Read back the stable registers in the 24 MHz SVGA timing profile. */
 static int sensor_verify_svga_30fps(void)
 {
@@ -612,6 +673,11 @@ static int sensor_set_window(sensor_device_t *dev, ov2640_sensor_mode_t mode,
         LOG_I("UXGA JPEG readback OK (24MHz, CLKRC=01 DVP=08)");
     }
 #endif
+#if !defined(CAMERA_USING_ARDUCAM_FIFO)
+    /* These profile checks read the sensor's register file back through SCCB.
+     * Behind the ArduCAM module the plain OV2640 register map is not exposed
+     * (reads answer with the module's own values), so the checks are only valid
+     * for the direct-sensor backends. */
     if (mode == OV2640_MODE_SVGA && dev->runtime.pixformat == PIXFORMAT_RGB565 &&
         g_hw_config.xclk_frequency_hz == 24000000U)
     {
@@ -622,8 +688,10 @@ static int sensor_set_window(sensor_device_t *dev, ov2640_sensor_mode_t mode,
     {
         return sensor_verify_uxga_rgb565(win_regs);
     }
+#endif /* CAMERA_USING_ARDUCAM_FIFO */
     return RT_EOK;
 }
+#endif /* CAMERA_USING_ARDUCAM_FIFO */
 
 /**
  * @brief Set frame size/resolution
@@ -633,6 +701,22 @@ static int sensor_set_window(sensor_device_t *dev, ov2640_sensor_mode_t mode,
  */
 static int sensor_set_framesize(sensor_device_t *dev, framesize_t framesize)
 {
+#if defined(CAMERA_USING_ARDUCAM_FIFO)
+    /* One complete JPEG table per mode; no crop/scale registers are involved. */
+    int ret;
+
+    if (framesize == FRAMESIZE_UXGA)
+        ret = sensor_write_arducam_table(OV2640_1600x1200_JPEG);
+    else if (framesize == FRAMESIZE_VGA)
+        ret = sensor_write_arducam_table(OV2640_640x480_JPEG);
+    else
+        return -RT_EINVAL;
+    if (ret != RT_EOK)
+        return ret;
+    rt_thread_mdelay(100);
+    dev->runtime.framesize = framesize;
+    return RT_EOK;
+#else
     if ((unsigned int)framesize > FRAMESIZE_UXGA)
     {
         return -RT_EINVAL;
@@ -672,6 +756,7 @@ static int sensor_set_framesize(sensor_device_t *dev, framesize_t framesize)
 
     ret = sensor_set_window(dev, mode, offset_x, offset_y, max_x, max_y, w, h);
     return ret;
+#endif /* CAMERA_USING_ARDUCAM_FIFO */
 }
 
 /**
@@ -705,6 +790,17 @@ static int sensor_init(sensor_device_t *dev)
     {
         return ret;
     }
+
+#if defined(CAMERA_USING_ARDUCAM_FIFO)
+    /* Reset, then the three common JPEG tables. The resolution table follows
+     * from sensor_set_framesize(). */
+    if ((sensor_write_arducam_table(OV2640_JPEG_INIT) != RT_EOK) ||
+        (sensor_write_arducam_table(OV2640_YUV422) != RT_EOK) ||
+        (sensor_write_arducam_table(OV2640_JPEG) != RT_EOK))
+    {
+        return -RT_EIO;
+    }
+#endif /* CAMERA_USING_ARDUCAM_FIFO */
 
     return sensor_init_status(dev);
 }
@@ -757,20 +853,48 @@ static int sensor_open(void)
         return ret;
     }
 
-
-    ret = sensor_init(cam_dev);
-    if (ret != 0)
+    /*
+     * The ArduCAM module only passes the camera's SCCB through once its
+     * controller has been reset and probed, so the data bus (which performs
+     * that handshake) has to come up before any sensor register access.
+     */
+    ret = camera_sensor_runtime_open(&cam_dev->runtime, &g_hw_config.runtime);
+    if (ret != RT_EOK)
     {
-        LOG_E("OV2640 init failed: %d", ret);
+        LOG_E("Camera runtime init failed: %d", ret);
         sccb_deinit();
         camera_xclk_stop(CAMERA_XCLK_PIN);
         s_active_device = RT_NULL;
         return ret;
     }
-    ret = camera_sensor_runtime_open(&cam_dev->runtime, &g_hw_config.runtime);
-    if (ret != RT_EOK)
+
+#if defined(CAMERA_USING_ARDUCAM_FIFO)
+    /* After the handshake the OV2640 has to answer on SCCB; rejecting the module
+     * here is clearer than failing later at capture time. */
     {
-        LOG_E("Camera runtime init failed: %d", ret);
+        uint8_t pid = 0U;
+        uint8_t ver = 0U;
+
+        if (sensor_read_reg(BANK_SENSOR, REG_PID, &pid) != RT_EOK ||
+            sensor_read_reg(BANK_SENSOR, REG_VER, &ver) != RT_EOK ||
+            (pid != 0x26U) || ((ver != 0x41U) && (ver != 0x42U)))
+        {
+            LOG_E("ArduCAM OV2640 id check failed (pid=0x%02x ver=0x%02x)", pid,
+                  ver);
+            camera_sensor_runtime_close(&cam_dev->runtime);
+            sccb_deinit();
+            camera_xclk_stop(CAMERA_XCLK_PIN);
+            s_active_device = RT_NULL;
+            return -RT_EIO;
+        }
+    }
+#endif /* CAMERA_USING_ARDUCAM_FIFO */
+
+    ret = sensor_init(cam_dev);
+    if (ret != 0)
+    {
+        LOG_E("OV2640 init failed: %d", ret);
+        camera_sensor_runtime_close(&cam_dev->runtime);
         sccb_deinit();
         camera_xclk_stop(CAMERA_XCLK_PIN);
         s_active_device = RT_NULL;
