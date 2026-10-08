@@ -1,4 +1,4 @@
-﻿# take_photo_to_sdcard 示例
+# take_photo_to_sdcard 示例
 
 [English](README_EN.md)
 
@@ -19,14 +19,14 @@ msh> take_photo_async <framesize> <quality>
 
 在 menuconfig 的 `Camera drivers -> Sensor settings -> Active camera sensor`
 中选择摄像头；选择 GC032A 后还可以选择 `8-bit DVP` 或
-`2-bit serial`，构建系统只会编译选中的 sensor 和 data backend。
+`2-bit SPI`，构建系统只会编译选中的 sensor 和 data backend。
 BF30A2 使用固定的 RGB565/240×320 模式。
 
 - `take_photo` 会查询当前摄像头能力：支持 JPEG 时保存 `.jpg`，否则使用
   RGB565 并保存 `.ppm`。
 - `take_photo_async` 仅适用于支持 JPEG 的摄像头。
 
-## GC032A 2-bit serial 接线
+## GC032A 2-bit SPI 接线
 
 仓库中的 GC032A 串行例程统一使用 GPTIM1 外部时钟触发 GPIO-DMA，因此
 `handle` 测试和本例程可以共用同一套接线；SPI1 保留给开发板上的 TF 卡。
@@ -104,6 +104,6 @@ GC032A 或 BF30A2 的 RGB565 输出类似：
 
 ## 备注
 
-- 引脚复用（SCCB / DVP 或 2-bit serial / XCLK）由 camera framework 内部完成
+- 引脚复用（SCCB / DVP 或 2-bit SPI / XCLK）由 camera framework 内部完成
 - `camera_change_settings()` 内部已经处理必要的 AEC/AWB 稳定等待
 - 如果看到 `sd card not found` 或挂载失败，请优先检查 `sd0` 设备、文件系统格式和板级连线

@@ -1,0 +1,72 @@
+config CUSTOM_MEM_MAP
+    bool
+	select custom_mem_map
+	default y if !SOC_SIMULATOR
+
+rsource "../../../Kconfig"
+
+menu "Camera DVP pads"
+
+	depends on CAMERA_DVP_BACKEND_DCMI
+
+	config CAMERA_DVP_VSYNC_PIN
+		int "VSYNC pad (PAx index, -1 = do not mux)"
+		default 37
+
+	config CAMERA_DVP_HSYNC_PIN
+		int "HSYNC pad (PAx index, -1 = do not mux)"
+		default 38
+
+	config CAMERA_DVP_PCLK_PIN
+		int "PCLK pad (PAx index, -1 = do not mux)"
+		default 40
+
+	config CAMERA_DVP_D0_PIN
+		int "D0 pad (PAx index, -1 = do not mux)"
+		default 41
+
+	config CAMERA_DVP_D1_PIN
+		int "D1 pad (PAx index, -1 = do not mux)"
+		default 43
+
+	config CAMERA_DVP_D2_PIN
+		int "D2 pad (PAx index, -1 = do not mux)"
+		default 44
+
+	config CAMERA_DVP_D3_PIN
+		int "D3 pad (PAx index, -1 = do not mux)"
+		default 42
+
+	config CAMERA_DVP_D4_PIN
+		int "D4 pad (PAx index, -1 = do not mux)"
+		default 48
+
+	config CAMERA_DVP_D5_PIN
+		int "D5 pad (PAx index, -1 = do not mux)"
+		default 47
+
+	config CAMERA_DVP_D6_PIN
+		int "D6 pad (PAx index, -1 = do not mux)"
+		default 46
+
+	config CAMERA_DVP_D7_PIN
+		int "D7 pad (PAx index, -1 = do not mux)"
+		default 45
+endmenu
+
+menu "Camera 2-bit SPI pads"
+
+	depends on CAMERA_SERIAL_SPI_2BIT
+
+	config CAMERA_SERIAL_CLK_PIN
+		int "Serial clock pad (PAx index, -1 = do not mux)"
+		default 40
+
+	config CAMERA_SERIAL_D0_PIN
+		int "Serial D0 pad (PAx index, -1 = do not mux)"
+		default 41
+
+	config CAMERA_SERIAL_D1_PIN
+		int "Serial D1 pad (PAx index, -1 = do not mux)"
+		default 43
+endmenu

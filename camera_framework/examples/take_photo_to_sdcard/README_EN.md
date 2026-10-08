@@ -1,4 +1,4 @@
-﻿# take_photo_to_sdcard Example
+# take_photo_to_sdcard Example
 
 [中文](README.md)
 
@@ -19,7 +19,7 @@ msh> take_photo_async <framesize> <quality>
 
 Select a sensor under
 `Camera drivers -> Sensor settings -> Active camera sensor` in menuconfig.
-After selecting GC032A, choose either `8-bit DVP` or `2-bit serial`. Only the
+After selecting GC032A, choose either `8-bit DVP` or `2-bit SPI`. Only the
 selected sensor and data backend are compiled.
 BF30A2 uses a fixed RGB565/240x320 mode.
 
@@ -27,7 +27,7 @@ BF30A2 uses a fixed RGB565/240x320 mode.
   JPEG is supported, otherwise it captures RGB565 and saves `.ppm`.
 - `take_photo_async` is available only for JPEG-capable sensors.
 
-## GC032A 2-bit Serial Wiring
+## GC032A 2-bit SPI Wiring
 
 All GC032A serial examples in this repository use a GPTIM1 external clock to
 trigger GPIO-DMA, so the `handle` test and this example share one wiring
@@ -106,6 +106,6 @@ Important:
 
 ## Notes
 
-- SCCB / DVP or 2-bit serial / XCLK pin muxing is handled by the camera framework
+- SCCB / DVP or 2-bit SPI / XCLK pin muxing is handled by the camera framework
 - `camera_change_settings()` already includes the required AEC/AWB settle delay internally
 - if you see `sd card not found` or mount failures, first check the `sd0` device, filesystem format, and board wiring

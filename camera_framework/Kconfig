@@ -63,7 +63,7 @@ if CAMERA_FRAMEWORK_ENABLE
                 bool "8-bit DVP"
 
             config CAMERA_GC032A_INTERFACE_SERIAL_2BIT
-                bool "2-bit serial"
+                bool "2-bit SPI"
         endchoice
 
         config CAMERA_READ_TIMEOUT_MS
@@ -106,8 +106,8 @@ if CAMERA_FRAMEWORK_ENABLE
             default 40
             range 0 95
             help
-              PAx pin used for the SCCB clock signal. GC032A serial examples
-              use PA30 to avoid the PA37-PA39 image-data pins.
+              PAx pin used for the SCCB clock signal. GC032A 2-bit SPI
+              examples use PA30 to avoid the PA37-PA39 image-data pins.
 
         config CAMERA_SCCB_SDA_PIN
             int "SCCB SDA pin (PAx index)"
@@ -118,8 +118,8 @@ if CAMERA_FRAMEWORK_ENABLE
             default 39
             range 0 95
             help
-              PAx pin used for the SCCB data signal. GC032A serial examples
-              use PA33 to avoid the PA37-PA39 image-data pins.
+              PAx pin used for the SCCB data signal. GC032A 2-bit SPI
+              examples use PA33 to avoid the PA37-PA39 image-data pins.
 
     endmenu
 
@@ -140,14 +140,51 @@ if CAMERA_FRAMEWORK_ENABLE
 
         config CAMERA_DATA_BUS_ADAPTER_NAME
             string
+            default "dcmi" if CAMERA_SERIAL_SPI_2BIT
             default "dvp" if CAMERA_USING_DVP
             default "camera_serial" if CAMERA_USING_SERIAL
             default "arducam_fifo" if CAMERA_USING_ARDUCAM_FIFO
             help
               Internal helper symbol that resolves to the selected data bus
-              adapter name for the active sensor interface.
+              adapter name for the active sensor interface. 2-bit SPI data is
+              carried by the DCMI SPI packet mode on 57x and by the GPIO-DMA
+              adapter on 52x/56x.
 
         if CAMERA_USING_DVP
+
+        choice
+            prompt "DVP capture backend"
+            default CAMERA_DVP_BACKEND_DCMI if SOC_SF32LB57X
+            default CAMERA_DVP_BACKEND_GPIO
+
+            config CAMERA_DVP_BACKEND_GPIO
+                bool "GPIO and timer DMA"
+                depends on SOC_SF32LB52X || SOC_SF32LB56X
+                select BSP_USING_GPTIM1
+
+            config CAMERA_DVP_BACKEND_DCMI
+                bool "Hardware DCMI (HAL)"
+                depends on SOC_SF32LB57X && !BSP_USING_DCMI
+                help
+                  Receive parallel DVP pixels through the SDK DCMI and DMA HAL.
+                  The framework owns capture, interrupts and JPEG frame completion.
+                  The board configures D0-D7, PCLK, HREF and VSYNC pinmux in
+                  HAL_DCMI_MspInit(). Keep the SDK DCMI device driver disabled.
+                  Raw streaming uses continuous capture and circular DMA.
+                  Supply two contiguous 64-byte-aligned buffers, each exactly
+                  one image payload in size. DMA half/full events hand off buffers.
+                  Validate borrowed frames before and after copying them.
+        endchoice
+
+        config CAMERA_DCMI_PCLK_FALLING
+            bool "DCMI capture on falling PCLK edge"
+            depends on CAMERA_DVP_BACKEND_DCMI
+            default n
+            help
+              Sample DVP data on the falling pixel-clock edge. By default,
+              capture uses the rising edge.
+
+        if CAMERA_DVP_BACKEND_GPIO
 
         config CAMERA_DVP_PINGPONG_POOL_SIZE
             int "Ping-pong pool size (compile-time ceiling)"
@@ -202,21 +239,99 @@ if CAMERA_FRAMEWORK_ENABLE
 
         endif
 
+        endif # CAMERA_USING_DVP
+
         if CAMERA_USING_SERIAL
+
+        choice
+            prompt "2-bit capture mode"
+            default CAMERA_SERIAL_SPI_2BIT if SOC_SF32LB57X
+            default CAMERA_SERIAL_GPIO_SAMPLING
+            help
+              How the two data lines are captured. Both modes deliver
+              the same RGB565 frames; they only differ in which hardware
+              samples the wire.
+
+            config CAMERA_SERIAL_GPIO_SAMPLING
+                bool "GPIO sampling and timer DMA"
+                depends on SOC_SF32LB52X || SOC_SF32LB56X
+                select BSP_USING_GPTIM1
+                help
+              Sample the two data lines with a timer-triggered DMA and decode
+              the packet markers in software. Supported on 52x/56x, where the
+              serial pads are plain GPIOs.
+
+            config CAMERA_SERIAL_SPI_2BIT
+                bool "DCMI SPI 2-bit packet mode"
+                depends on SOC_SF32LB57X && !BSP_USING_DCMI
+                help
+              Receive the two data lines through the SDK DCMI in its SPI
+              packet mode: the peripheral locks on the packet identifiers,
+              strips the markers and packs the payload into the DMA buffer.
+              The clock and data pads are muxed by the board code in
+              HAL_DCMI_MspInit(). Keep the SDK DCMI device driver disabled.
+              Raw streaming uses continuous capture and circular DMA.
+        endchoice
+
+        if CAMERA_SERIAL_SPI_2BIT
+
+        config CAMERA_SERIAL_SPI_PACKET_SIZE
+            int "Packet size (bytes per line)"
+            default 1280
+            range 1 65535
+            help
+              Bytes of payload the sensor sends for one image line. The DCMI
+              uses it to tell a complete packet from a truncated one. A line
+              of 640 RGB565 pixels is 1280 bytes.
+
+        config CAMERA_SERIAL_SPI_PACKET_IDS
+            hex "Packet identifiers"
+            default 0x9d80b6ca
+            help
+              Marker bytes that frame the packets, packed low to high as
+              frame start, frame end, line start and line end. GC032A sends
+              frame start 0xca, frame end 0xb6, line start 0x80 and line end
+              0x9d.
+
+        config CAMERA_SERIAL_SPI_SYNC_WORD
+            hex "Sync word"
+            default 0x00ffffff
+            help
+              24-bit pattern the DCMI looks for while it hunts for the first
+              packet boundary. The all-ones default is what GC032A needs.
+
+        config CAMERA_SERIAL_SPI_SAMPLE_FALLING
+            bool "Sample on the falling clock edge"
+            default y
+            help
+              Capture the serial data on the falling serial clock edge, as
+              GC032A needs. Disable it to sample on the rising edge.
+
+        config CAMERA_SERIAL_SPI_DI_SWAP
+            bool "Swap the two data lines"
+            default n
+            help
+              Treat DI1 as the first serial data line and DI0 as the second.
+              Enable it when the two wires reach the SoC in the opposite order
+              instead of rewiring the flex.
+
+        endif # CAMERA_SERIAL_SPI_2BIT
 
         config CAMERA_SERIAL_SAMPLE_BUFFER_SIZE
             int "Serial GPIO DMA sample buffer size"
             default 32768
             range 1024 65528
             help
-              Number of GPIO samples stored by the circular DMA buffer.
-              The value must be a multiple of 8 and no greater than 65535.
+              Number of GPIO samples stored by the circular DMA buffer of the
+              GPIO sampling and timer DMA mode. The value must be a multiple
+              of 8 and no greater than 65535. Unused by the DCMI SPI 2-bit
+              packet mode.
 
         config CAMERA_SERIAL_WORKER_STACK_SIZE
             int
             default 2048
 
-        endif
+        endif # CAMERA_USING_SERIAL
 
         if CAMERA_USING_ARDUCAM_FIFO
 

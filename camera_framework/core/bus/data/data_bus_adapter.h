@@ -89,6 +89,49 @@ typedef void (*bus_frame_notify_callback_t)(void *buffer,
                                             uint32_t length,
                                             void *user_data);
 
+typedef enum
+{
+    BUS_STREAM_MODE_FRAME = 0,
+    BUS_STREAM_MODE_HALF_FRAME,
+} bus_stream_mode_t;
+
+typedef enum
+{
+    BUS_STREAM_EVENT_FRAME = 0,
+    BUS_STREAM_EVENT_HALF_FIRST,
+    BUS_STREAM_EVENT_HALF_SECOND,
+} bus_stream_event_type_t;
+
+/* Native stream events borrow caller-owned DMA memory. Half-frame events
+ * retain the full image buffer address and size, with a paired sequence for
+ * HT/TC. A nonzero error reports a capture failure and may carry no buffer.
+ * Sequences distinguish reuse across restarts. */
+typedef struct
+{
+    void *buffer;
+    uint32_t size;
+    uint32_t sequence;
+    int error;
+    uint32_t timestamp_ticks; /* capture event tick; zero if unavailable */
+    bus_stream_event_type_t event_type;
+} bus_stream_frame_t;
+
+/* May run in IRQ context; publish metadata only and keep the callback short. */
+typedef void (*bus_stream_frame_callback_t)(void *context,
+                                            const bus_stream_frame_t *frame);
+
+typedef struct
+{
+    void *buffers[2];
+    uint32_t buffer_size; /* allocated capacity of each buffer */
+    bus_stream_frame_callback_t frame_callback;
+    void *callback_context;
+    /* Expected complete-image bytes; zero uses buffer_size. FRAME requires
+     * two contiguous image buffers on DCMI. HALF_FRAME uses only buffers[0]. */
+    uint32_t expected_frame_size;
+    bus_stream_mode_t mode;
+} bus_stream_config_t;
+
 /*
  * Bus adapter operations.
  *
@@ -135,6 +178,24 @@ typedef struct bus_adapter_ops {
      * NULL means this adapter provides no diagnostic output.
      */
     void (*dump_state)(bus_adapter_t *self);
+    /* Optional native continuous capture without per-frame rearm calls.
+     * FRAME rotates two image buffers; HALF_FRAME reports the two halves of
+     * one image buffer. After a failed start, the caller must confirm a
+     * successful stop before releasing the buffers.
+     * Successful stop/abort/deinit must quiesce DMA and callbacks before return;
+     * these lifecycle operations must support retries after a partial failure. */
+    int (*start_stream)(bus_adapter_t *self, const bus_stream_config_t *config);
+    /* Return 1 only while this generation remains readable and is not a DMA
+     * destination. This short query may run with interrupts masked. It neither
+     * pins the buffer nor performs cache maintenance. */
+    int (*stream_frame_valid)(bus_adapter_t *self, const bus_stream_frame_t *frame);
+    /* Optional bounded continuous JPEG capture. Receive frame_count frames in
+     * one hardware run, discard earlier frames and notify once with the last
+     * complete JPEG at buffer[0]. size is the total capture storage capacity;
+     * exhausting it must fail without wrapping over received data. Stop/abort
+     * ownership rules match start_capture and start_stream. */
+    int (*start_capture_frames)(bus_adapter_t *self, void *buffer,
+                                uint32_t size, uint32_t frame_count);
 } bus_adapter_ops_t;
 
 struct bus_adapter {
@@ -183,6 +244,11 @@ int bus_adapter_set_frame_notify_callback(bus_adapter_t *self,
 /** @brief Wrapper for start_capture op. */
 int bus_adapter_start_capture(bus_adapter_t *self, void *buffer, uint32_t size);
 
+/** @brief Receive frame_count >= 1 JPEG frames continuously; return only the last.
+ * Unsupported backends return BUS_ERR_NOT_SUPPORTED without snapshot fallback. */
+int bus_adapter_start_capture_frames(bus_adapter_t *self, void *buffer,
+                                     uint32_t size, uint32_t frame_count);
+
 /** @brief Wrapper for rearm_capture op. */
 int bus_adapter_rearm_capture(bus_adapter_t *self, void *buffer, uint32_t size);
 
@@ -194,6 +260,12 @@ int bus_adapter_set_pingpong_size(bus_adapter_t *self, uint32_t size);
 
 /** @brief Wrapper for set_mode op. */
 int bus_adapter_set_mode(bus_adapter_t *self, bus_capture_mode_t mode);
+
+/** @brief Start optional native full-frame or half-frame continuous capture. */
+int bus_adapter_start_stream(bus_adapter_t *self, const bus_stream_config_t *config);
+
+/** @brief Return 1 for a currently readable generation; unsupported returns 0. */
+int bus_adapter_stream_frame_valid(bus_adapter_t *self, const bus_stream_frame_t *frame);
 
 /** @brief Call optional adapter dump_state hook. */
 void bus_adapter_dump_state(bus_adapter_t *self);
