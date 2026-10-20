@@ -154,6 +154,57 @@ size_t camera_jpeg_frame_size(const uint8_t *buffer, size_t size)
     return 0U;
 }
 
+size_t camera_jpeg_find_last_frame(const uint8_t *buffer, size_t size,
+                                   size_t *frame_offset)
+{
+    size_t start = 0U;
+    size_t best_offset = 0U;
+    size_t best_size = 0U;
+
+    if (frame_offset != NULL)
+    {
+        *frame_offset = 0U;
+    }
+    if (buffer == NULL || size < 4U)
+    {
+        return 0U;
+    }
+
+    while ((start + 4U) <= size)
+    {
+        size_t length;
+
+        /* Skip to the next SOI candidate; the bytes before it are the tail of a
+         * frame that was already being transmitted when the capture started. */
+        while (((start + 2U) <= size) &&
+               (buffer[start] != 0xFFU || buffer[start + 1U] != 0xD8U))
+        {
+            ++start;
+        }
+        if ((start + 4U) > size)
+        {
+            break;
+        }
+        length = camera_jpeg_frame_size(buffer + start, size - start);
+        if (length != 0U)
+        {
+            best_offset = start;
+            best_size = length;
+            start += length;
+            continue;
+        }
+        /* A stuffed 0xFFD8 inside entropy data is not a frame start: keep
+         * looking for the SOI of a frame that really is complete here. */
+        ++start;
+    }
+
+    if (best_size != 0U && frame_offset != NULL)
+    {
+        *frame_offset = best_offset;
+    }
+    return best_size;
+}
+
 size_t camera_jpeg_find_frame(const uint8_t *buffer, size_t size,
                              uint32_t frame_number, size_t *frame_offset)
 {

@@ -29,8 +29,8 @@ int main(void)
         return -1;
 
 #if defined(USING_BUTTON_LIB)
-    /* KEY1 (PA34) and the first ADC key take a photo, see
-     * src/input/camera_keys.c; "camera_photo" does the same from the console. */
+    /* KEY1 (PA34) takes a photo, see src/input/camera_keys.c; "camera_photo" does
+     * the same from the console. ADC keys are opt-in there. */
     if (camera_keys_init(camera_shutter_handler, camera_album_noop,
                          camera_next_noop) != 0)
         rt_kprintf("camera: key init failed\n");

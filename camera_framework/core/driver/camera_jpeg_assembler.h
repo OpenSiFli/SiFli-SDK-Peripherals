@@ -40,4 +40,12 @@ size_t camera_jpeg_frame_size(const uint8_t *buffer, size_t size);
 size_t camera_jpeg_find_frame(const uint8_t *buffer, size_t size,
                              uint32_t frame_number, size_t *frame_offset);
 
+/* Find the last complete JPEG anywhere in received bytes and report where it
+ * starts. A DCMI capture opens wherever the sensor happens to be, so the buffer
+ * may begin with the tail of a frame that started before the capture was armed;
+ * that tail is skipped and a candidate SOI inside entropy data is rejected when
+ * the marker stream that follows it does not parse as a whole image. */
+size_t camera_jpeg_find_last_frame(const uint8_t *buffer, size_t size,
+                                   size_t *frame_offset);
+
 #endif /* CAMERA_JPEG_ASSEMBLER_H */

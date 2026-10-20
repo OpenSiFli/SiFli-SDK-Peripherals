@@ -30,6 +30,8 @@ typedef struct
     bus_type_t adapter_type;
     uint32_t frame_timeout_ms;
     const camera_capture_config_t *default_config;
+    /* Sensor-owned serial packet format; NULL for parallel/JPEG buses. */
+    const bus_serial_config_t *serial;
 } camera_sensor_runtime_config_t;
 
 typedef struct

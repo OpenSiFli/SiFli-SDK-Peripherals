@@ -6,6 +6,9 @@
 #define DBG_LVL DBG_INFO
 #include <rtdbg.h>
 
+/* How long arming one capture waits for the previous one to retire. */
+#define CAMERA_SENSOR_BUSY_RETRY_MS 50U
+
 typedef struct
 {
     uint16_t width;
@@ -266,6 +269,11 @@ int camera_sensor_runtime_open(camera_sensor_runtime_t *runtime,
     {
         return RT_EOK;
     }
+    rt_memset(&bus_config, 0, sizeof(bus_config));
+    if (config->serial != RT_NULL)
+    {
+        bus_config.serial = *config->serial;
+    }
     if (camera_sensor_bus_mode(config->default_config->pixformat,
                                &bus_config.mode) != RT_EOK)
     {
@@ -421,6 +429,40 @@ int camera_sensor_runtime_set_framesize(camera_sensor_runtime_t *runtime,
     return RT_EOK;
 }
 
+/*
+ * Arm one capture, tolerating a backend that is still retiring the previous
+ * one.
+ *
+ * A blocking capture is woken from inside the backend's completion callback, so
+ * a caller that immediately requests the next frame reaches the backend while
+ * that callback is still on its way out: the deferred work has not cleared its
+ * "dispatching" flag yet, and the DMA abort of the finished transfer may still
+ * be settling. Both surface as -RT_EBUSY, which is transient here rather than a
+ * real conflict; without this retry a burst of back-to-back single shots fails
+ * every frame after the first one instantly.
+ */
+static int camera_sensor_start_capture(camera_sensor_runtime_t *runtime,
+                                       void *buffer, rt_size_t size,
+                                       uint32_t frame_count)
+{
+    rt_tick_t started = rt_tick_get();
+    int ret;
+
+    for (;;)
+    {
+        ret = frame_count != 0U ?
+              bus_adapter_start_capture_frames(runtime->data_bus, buffer, size,
+                                               frame_count) :
+              bus_adapter_start_capture(runtime->data_bus, buffer, size);
+        if (ret != -RT_EBUSY)
+            return ret;
+        if ((rt_tick_t)(rt_tick_get() - started) >=
+            rt_tick_from_millisecond(CAMERA_SENSOR_BUSY_RETRY_MS))
+            return ret;
+        rt_thread_mdelay(1);
+    }
+}
+
 static rt_size_t camera_sensor_runtime_capture_blocking(camera_sensor_runtime_t *runtime,
                                                         void *buffer,
                                                         rt_size_t size,
@@ -443,9 +485,7 @@ static rt_size_t camera_sensor_runtime_capture_blocking(camera_sensor_runtime_t 
         camera_jpeg_assembler_reset(&runtime->jpeg_single, buffer, size);
     }
 
-    ret = frame_count != 0U ?
-          bus_adapter_start_capture_frames(runtime->data_bus, buffer, size, frame_count) :
-          bus_adapter_start_capture(runtime->data_bus, buffer, size);
+    ret = camera_sensor_start_capture(runtime, buffer, size, frame_count);
     if (ret != RT_EOK && ret != BUS_OK)
     {
         return 0;
@@ -531,7 +571,7 @@ int camera_sensor_runtime_capture_async(camera_sensor_runtime_t *runtime,
         camera_jpeg_assembler_reset(&runtime->jpeg_single, buffer, size);
     }
 
-    ret = bus_adapter_start_capture(runtime->data_bus, buffer, size);
+    ret = camera_sensor_start_capture(runtime, buffer, size, 0U);
     if (ret != RT_EOK && ret != BUS_OK)
     {
         level = rt_hw_interrupt_disable();

@@ -1,10 +1,12 @@
-/* SPDX-License-Identifier: Apache-2.0 */
+﻿/* SPDX-License-Identifier: Apache-2.0 */
 #include "data_bus_adapter.h"
 #include "camera_jpeg_assembler.h"
 
 #include <bf0_hal.h>
 #include <rtdevice.h>
 #include <dma_config.h>
+#include <drv_dcmi.h>
+#include <drv_io.h>
 #include <ipc/workqueue.h>
 #include <rthw.h>
 #include <rtthread.h>
@@ -18,8 +20,8 @@
 #error "The hardware DCMI camera backend requires SF32LB57X"
 #endif
 
-#if defined(BSP_USING_DCMI)
-#error "The camera DCMI backend owns the peripheral; disable BSP_USING_DCMI"
+#if !defined(BSP_USING_DCMI)
+#error "The camera DCMI backend requires the SDK DCMI driver: enable BSP_USING_DCMI"
 #endif
 
 #define DCMI_BUFFER_ALIGNMENT 64U
@@ -27,13 +29,16 @@
 #define DCMI_STREAM_STACK_SIZE 2048U
 #define DCMI_STREAM_PRIORITY 19U
 
+/* Every wake-up source drv_dcmi.c can raise from the DCMI interrupt. Used to
+ * park the interrupt enable mask through the SDK helper instead of the IE
+ * register. */
+#define DCMI_ALL_IE (DCMI_IE_FRAME_IE | DCMI_IE_OVR_IE | DCMI_IE_FSM_ERR_IE | \
+                     DCMI_IE_PACK_SIZE_ERR_IE | DCMI_IE_VSYNC_IE | DCMI_IE_LINE_IE)
+
 #if defined(CAMERA_SERIAL_SPI_2BIT)
 #define CAMERA_DCMI_SERIAL_2BIT 1
 #define CAMERA_DCMI_IF_SPI        1U /* DCMI_CR.IF_SEL: serial packets */
 #define CAMERA_DCMI_SPI_2LINE     2U /* __HAL_DCMI_SPI_DATA_LINE halves it */
-#define CAMERA_DCMI_PACKET_SIZE   CAMERA_SERIAL_SPI_PACKET_SIZE
-#define CAMERA_DCMI_PACKET_IDS    CAMERA_SERIAL_SPI_PACKET_IDS
-#define CAMERA_DCMI_SYNC_WORD     CAMERA_SERIAL_SPI_SYNC_WORD
 #define CAMERA_DCMI_IF_SEL        CAMERA_DCMI_IF_SPI
 #else
 #define CAMERA_DCMI_IF_SEL        0U /* DCMI_CR.IF_SEL: parallel DVP */
@@ -41,11 +46,14 @@
 
 typedef struct
 {
-    DCMI_HandleTypeDef handle;
-    DMA_HandleTypeDef hdma;
+    /* Borrowed from the SDK dcmi device (rt_get_dcmi_device()). drv_dcmi.c
+     * owns the peripheral state, the DMA channel and the interrupt vectors,
+     * so the backend must work on these handles rather than on copies. */
+    struct rt_dcmi_device *device;
+    DCMI_HandleTypeDef *handle;
+    DMA_HandleTypeDef *hdma;
     uint8_t *frame_buffer;
     uint32_t buffer_size;
-    uint32_t error;
 } camera_dcmi_hw_t;
 
 typedef struct
@@ -69,6 +77,8 @@ typedef struct
     volatile int error;
     uint32_t sequence;
     bus_capture_mode_t mode;
+    /* Sensor-supplied serial packet format (2-bit SPI mode only). */
+    bus_serial_config_t serial;
     bus_frame_notify_callback_t frame_callback;
     void *frame_context;
     bus_stream_config_t stream;
@@ -119,6 +129,34 @@ static int camera_dcmi_lock(camera_dcmi_t *dcmi)
 static void camera_dcmi_unlock(camera_dcmi_t *dcmi)
 {
     rt_mutex_release(&dcmi->lock);
+}
+
+/* drv_dcmi.c records the DCMI faults it handles itself (frame cursor, FSM
+ * desync, FIFO overflow, SPI packet-size error) in its device object and
+ * exports them through rt_hw_dcmi_get_error(); the HAL handles only carry
+ * their own error codes. Read the SDK field through its API instead of keeping
+ * a private copy the framework never sets. */
+static int camera_dcmi_device_error(camera_dcmi_hw_t *hardware)
+{
+    return hardware->device != RT_NULL ?
+           rt_hw_dcmi_get_error((rt_device_t)hardware->device) : 0;
+}
+
+static void camera_dcmi_clear_device_error(camera_dcmi_hw_t *hardware)
+{
+    if (hardware->device != RT_NULL)
+        hardware->device->error = 0U;
+}
+
+/* Destination words still to be written by the DMA channel. The only way to
+ * see the destination position of a dynamic channel today: HAL exposes the
+ * source counter (__HAL_DMA_GET_COUNTER) but not the destination one, so read
+ * the raw GPDMA field. Kept in one place so it can be swapped for an SDK helper
+ * the moment one exists (see the note at the top of this file). */
+static uint32_t camera_dcmi_dma_writes_left(camera_dcmi_hw_t *hardware)
+{
+    return ((GPDMA_Channel_TypeDef *)hardware->hdma->Instance)->CSR &
+           GPDMA_CSR1_DSTNDT_Msk;
 }
 
 /* Keep the token and pending flag paired across stop/deinit/restart. An old
@@ -188,20 +226,29 @@ static int camera_dcmi_mode_valid(bus_capture_mode_t mode)
 
 /* Pixel clock edge used for capture. The DCMI shares the CR PCKPOL bit between
  * the parallel clock polarity and the serial clock edge, so one setting drives
- * both backends. */
-static uint32_t camera_dcmi_clock_polarity(void)
+ * both backends. In serial mode the edge comes from the sensor's packet format;
+ * in parallel mode it is the board's CAMERA_DCMI_PCLK_FALLING wiring fact. */
+static uint32_t camera_dcmi_clock_polarity(const camera_dcmi_t *dcmi)
 {
 #if defined(CAMERA_DCMI_SERIAL_2BIT)
-#if defined(CAMERA_SERIAL_SPI_SAMPLE_FALLING)
-    return DCMI_PCKPOLARITY_FALLING;
-#else
-    return DCMI_PCKPOLARITY_RISING;
-#endif
+    return dcmi->serial.sample_falling ? DCMI_PCKPOLARITY_FALLING :
+                                         DCMI_PCKPOLARITY_RISING;
 #elif defined(CAMERA_DCMI_PCLK_FALLING)
+    (void)dcmi;
     return DCMI_PCKPOLARITY_FALLING;
 #else
+    (void)dcmi;
     return DCMI_PCKPOLARITY_RISING;
 #endif
+}
+
+/* Interrupt-context capture stop. __HAL_DCMI_CAPTURE_STOP() spins until the
+ * CAPTURE bit drops, which can take up to the end of the current frame, so it
+ * must not run from the DCMI/DMA interrupt. Clear the bit and leave the late
+ * completion to capture_closing, which already fences the notification path. */
+static void camera_dcmi_capture_stop_async(camera_dcmi_hw_t *hardware)
+{
+    hardware->handle->Instance->CR &= ~DCMI_CR_CAPTURE;
 }
 
 static int camera_dcmi_stop_transfer_locked(camera_dcmi_t *dcmi)
@@ -211,17 +258,20 @@ static int camera_dcmi_stop_transfer_locked(camera_dcmi_t *dcmi)
 
     dcmi->capture_closing = RT_TRUE;
     dcmi->capture_armed = RT_FALSE;
-    hardware->handle.Instance->CR &= ~DCMI_CR_CAPTURE;
     rt_hw_interrupt_enable(level);
-    if (hardware->hdma.State == HAL_DMA_STATE_BUSY &&
-        HAL_DMA_Abort_IT(&hardware->hdma) != HAL_OK)
+    /* capture_closing already fences the notification path, so the peripheral
+     * can be stopped outside the critical section and the SDK helper's wait for
+     * CAPTURE to drop does not run with interrupts disabled. */
+    __HAL_DCMI_CAPTURE_STOP(hardware->handle);
+    if (hardware->hdma->State == HAL_DMA_STATE_BUSY &&
+        HAL_DMA_Abort_IT(hardware->hdma) != HAL_OK)
         return -RT_EBUSY;
     /* A released dynamic channel may already belong to another device. */
-    if ((hardware->handle.Instance->CR & DCMI_CR_CAPTURE) != 0U ||
-        (hardware->hdma.State != HAL_DMA_STATE_READY &&
-         hardware->hdma.State != HAL_DMA_STATE_RESET))
+    if ((hardware->handle->Instance->CR & DCMI_CR_CAPTURE) != 0U ||
+        (hardware->hdma->State != HAL_DMA_STATE_READY &&
+         hardware->hdma->State != HAL_DMA_STATE_RESET))
         return -RT_EBUSY;
-    hardware->handle.State = HAL_DCMI_STATE_READY;
+    hardware->handle->State = HAL_DCMI_STATE_READY;
     if (dcmi->hardware_started)
     {
 #ifdef RT_USING_PM
@@ -237,10 +287,11 @@ static int camera_dcmi_stop_transfer_locked(camera_dcmi_t *dcmi)
  * owned by this stream. HAL clears each serviced flag before the DMA callback. */
 static uint32_t camera_dcmi_dma_pending(camera_dcmi_hw_t *hardware)
 {
-    uint32_t shift = hardware->hdma.ChannelIndex & 0x1cU;
-
-    return (hardware->hdma.DmaBaseAddress->ISR >> shift) &
-           (DMA_FLAG_HT1 | DMA_FLAG_TC1 | DMA_FLAG_TE1);
+    /* __HAL_DMA_GET_FLAG() masks the raw ISR itself; the per-channel shift is
+     * still the caller's job, exactly as HAL does it internally. */
+    return __HAL_DMA_GET_FLAG(hardware->hdma,
+                              (DMA_FLAG_HT1 | DMA_FLAG_TC1 | DMA_FLAG_TE1) <<
+                              (hardware->hdma->ChannelIndex & 0x1cU));
 }
 
 /* A half-transfer interrupt is based on source reads. Check the destination
@@ -254,17 +305,16 @@ static rt_bool_t camera_dcmi_buffer_idle(camera_dcmi_t *dcmi, uint32_t index)
     uint32_t reads_left, writes_left;
     uint32_t read_index, write_index;
 
-    if (hardware->hdma.State != HAL_DMA_STATE_BUSY || hardware->hdma.Instance == RT_NULL ||
-        hardware->handle.ErrorCode != HAL_DCMI_ERROR_NONE ||
-        hardware->hdma.ErrorCode != HAL_DMA_ERROR_NONE ||
-        (hardware->handle.Instance->CR & DCMI_CR_CAPTURE) == 0U ||
-        (hardware->handle.Instance->RIS & (DCMI_FLAG_ERRRI | DCMI_FLAG_OVRRI)) != 0U)
+    if (hardware->hdma->State != HAL_DMA_STATE_BUSY || hardware->hdma->Instance == RT_NULL ||
+        hardware->handle->ErrorCode != HAL_DCMI_ERROR_NONE ||
+        hardware->hdma->ErrorCode != HAL_DMA_ERROR_NONE ||
+        (hardware->handle->Instance->CR & DCMI_CR_CAPTURE) == 0U ||
+        __HAL_DCMI_GET_FLAG(hardware->handle, DCMI_FLAG_ERRRI | DCMI_FLAG_OVRRI) != 0U)
         return RT_FALSE;
     if (camera_dcmi_dma_pending(hardware) != 0U)
         return RT_FALSE;
-    reads_left = __HAL_DMA_GET_COUNTER(&hardware->hdma);
-    writes_left = ((GPDMA_Channel_TypeDef *)hardware->hdma.Instance)->CSR &
-                  GPDMA_CSR1_DSTNDT_Msk;
+    reads_left = __HAL_DMA_GET_COUNTER(hardware->hdma);
+    writes_left = camera_dcmi_dma_writes_left(hardware);
     if (reads_left > total || writes_left > total)
         return RT_FALSE;
     read_index = reads_left != 0U && reads_left <= half ? 1U : 0U;
@@ -306,9 +356,9 @@ static void camera_dcmi_rx(camera_dcmi_t *dcmi, uint32_t size)
     if (!dcmi->started || dcmi->stopping || dcmi->error != 0 ||
         dcmi->capture_closing)
         goto done;
-    if (hardware->error != 0U ||
-        hardware->handle.ErrorCode != HAL_DCMI_ERROR_NONE ||
-        hardware->hdma.ErrorCode != HAL_DMA_ERROR_NONE)
+    if (camera_dcmi_device_error(hardware) != 0 ||
+        hardware->handle->ErrorCode != HAL_DCMI_ERROR_NONE ||
+        hardware->hdma->ErrorCode != HAL_DMA_ERROR_NONE)
         error = -RT_EIO;
     if (dcmi->native_stream)
     {
@@ -319,7 +369,7 @@ static void camera_dcmi_rx(camera_dcmi_t *dcmi, uint32_t size)
             camera_dcmi_invalidate(dcmi);
             dcmi->error = error;
             dcmi->capture_armed = RT_FALSE;
-            hardware->handle.Instance->CR &= ~DCMI_CR_CAPTURE;
+            camera_dcmi_capture_stop_async(hardware);
             if (dcmi->stream.mode == BUS_STREAM_MODE_HALF_FRAME)
             {
                 frame.error = error;
@@ -374,7 +424,7 @@ static void camera_dcmi_rx(camera_dcmi_t *dcmi, uint32_t size)
          * image; HT is a byte-capacity notification and TC means overflow. */
         if (dcmi->burst_frames != 0U)
         {
-            if (size == dcmi->single_size || hardware->hdma.State != HAL_DMA_STATE_BUSY)
+            if (size == dcmi->single_size || hardware->hdma->State != HAL_DMA_STATE_BUSY)
                 error = -RT_EIO;
             if (error == 0)
             {
@@ -387,13 +437,13 @@ static void camera_dcmi_rx(camera_dcmi_t *dcmi, uint32_t size)
             dcmi->error = error;
             dcmi->single_end_tick = rt_tick_get();
             dcmi->single_pending = RT_TRUE;
-            hardware->handle.Instance->CR &= ~DCMI_CR_CAPTURE;
+            camera_dcmi_capture_stop_async(hardware);
             submit_single = RT_TRUE;
         }
         /* Abort callbacks are excluded by capture_closing above. */
         else if (error != 0 || size == dcmi->single_size || (jpeg && size == 0U))
         {
-            dcmi->single_received = jpeg ? hardware->handle.Instance->JPEG_BYTE : dcmi->single_size;
+            dcmi->single_received = jpeg ? hardware->handle->Instance->JPEG_BYTE : dcmi->single_size;
             if (jpeg && (size == dcmi->single_size || dcmi->single_received < 4U ||
                          dcmi->single_received >= dcmi->single_size))
                 error = -RT_EIO;
@@ -402,7 +452,7 @@ static void camera_dcmi_rx(camera_dcmi_t *dcmi, uint32_t size)
             dcmi->single_pending = RT_TRUE;
             /* Snapshot capture also stops at EOF. Stop requests immediately
              * on capacity exhaustion so the circular region cannot run on. */
-            hardware->handle.Instance->CR &= ~DCMI_CR_CAPTURE;
+            camera_dcmi_capture_stop_async(hardware);
             submit_single = RT_TRUE;
         }
     }
@@ -419,123 +469,93 @@ done:
         rt_work_submit(&dcmi->single_work, 0);
 }
 
-static void camera_dcmi_dma_half(DMA_HandleTypeDef *dma)
+/* drv_dcmi.c reports DMA progress through rx_indicate: the DMA region size for
+ * HT/TC and zero for an abort or error. It also owns the DCMI interrupt and
+ * raises the same zero-length notification from HAL_DCMI_FrameEventCallback()
+ * for FRAME, FSM, overflow and packet-size events. Both map onto the capture
+ * state machine below without the backend owning any interrupt vector. */
+static rt_err_t camera_dcmi_rx_indicate(rt_device_t dev, rt_size_t size)
 {
-    (void)dma;
-    camera_dcmi_rx(&s_dcmi, s_dcmi.hardware.buffer_size / 2U);
+    (void)dev;
+    camera_dcmi_rx(&s_dcmi, (uint32_t)size);
+    return RT_EOK;
 }
 
-static void camera_dcmi_dma_full(DMA_HandleTypeDef *dma)
-{
-    (void)dma;
-    camera_dcmi_rx(&s_dcmi, s_dcmi.hardware.buffer_size);
-}
-
-static void camera_dcmi_dma_error(DMA_HandleTypeDef *dma)
-{
-    (void)dma;
-    camera_dcmi_rx(&s_dcmi, 0U);
-}
-
-void DCMI_IRQHandler(void)
-{
-    camera_dcmi_hw_t *hardware = &s_dcmi.hardware;
-    uint32_t packet_error;
-
-    rt_interrupt_enter();
-    packet_error = hardware->handle.Instance->MIS & DCMI_MIS_PACK_SIZE_ERR_MIS;
-    if (packet_error != 0U)
-    {
-        __HAL_DCMI_CLEAR_FLAG(&hardware->handle, DCMI_ISC_PACK_SIZE_ERR_ISC);
-        hardware->error |= packet_error;
-    }
-    HAL_DCMI_IRQHandler(&hardware->handle);
-    if (packet_error != 0U)
-        camera_dcmi_rx(&s_dcmi, 0U);
-    rt_interrupt_leave();
-}
-
-#ifndef DMA_SUPPORT_DYN_CHANNEL_ALLOC
-void DCMI_DMA_IRQHandler(void)
-{
-    rt_interrupt_enter();
-    HAL_DMA_IRQHandler(&s_dcmi.hardware.hdma);
-    rt_interrupt_leave();
-}
-#endif
-
-void HAL_DCMI_FrameEventCallback(DCMI_HandleTypeDef *handle)
-{
-    if (handle != &s_dcmi.hardware.handle)
-        return;
-    camera_dcmi_rx(&s_dcmi, 0U);
-    /* HAL masks FRAME on every interrupt, including continuous capture. */
-    __HAL_DCMI_ENABLE_IT(handle, DCMI_IE_FRAME_IE | DCMI_IE_OVR_IE |
-                        DCMI_IE_FSM_ERR_IE | DCMI_IE_PACK_SIZE_ERR_IE);
-}
-
-/* HAL synchronization/overflow errors abort DMA before invoking this hook. */
+/* HAL's own error hook (DMA/HAL fault classes). The DCMI-specific faults the
+ * SDK handles in its own frame callback are read through
+ * camera_dcmi_device_error() instead. */
 void HAL_DCMI_ErrorCallback(DCMI_HandleTypeDef *handle)
 {
-    if (handle == &s_dcmi.hardware.handle)
+    if (handle == s_dcmi.hardware.handle)
         camera_dcmi_rx(&s_dcmi, 0U);
 }
+
+/* drv_dcmi.c implements this, but drv_dcmi.h only declares the stale
+ * rt_hw_dcmi_dma_config(), so it is declared here (see the note at the top).
+ * Declaring it keeps the SDK's own DMA start path instead of programming the
+ * channel from the backend. */
+extern void rt_hw_dcmi_dma_start(rt_device_t dev);
 
 static int camera_dcmi_hw_init(camera_dcmi_t *dcmi)
 {
     camera_dcmi_hw_t *hardware = &dcmi->hardware;
+    struct rt_dcmi_device *device;
+    rt_device_t dev;
+    rt_err_t result;
 
-    hardware->handle.Instance = hwp_dcmi;
-    hardware->handle.Init.SynchroMode = DCMI_SYNCHRO_HARDWARE;
-    hardware->handle.Init.PCKPolarity = camera_dcmi_clock_polarity();
-#if defined(CAMERA_DCMI_SERIAL_2BIT)
-    /* The SPI packet mode syncs on the markers in the data stream, so the
-     * VSYNC/HSYNC polarity is unused. Keep the SDK's own values. */
-    hardware->handle.Init.VSPolarity = DCMI_VSPOLARITY_LOW;
-    hardware->handle.Init.HSPolarity = DCMI_HSPOLARITY_HIGH;
-#else
-    hardware->handle.Init.VSPolarity = DCMI_VSPOLARITY_HIGH;
-    hardware->handle.Init.HSPolarity = DCMI_HSPOLARITY_HIGH;
-#endif
-    hardware->handle.Init.ExtendedDataMode = DCMI_EXTEND_DATA_8B;
-    __HAL_LINKDMA(&hardware->handle, DMA_Handle, hardware->hdma);
-    if (HAL_DCMI_Init(&hardware->handle) != HAL_OK)
+    /* The SDK driver owns the peripheral, the DMA channel and both interrupt
+     * vectors. Opening the device runs rt_dcmi_init(), which initialises the
+     * DCMI from the board's own configuration. */
+    dev = rt_device_find("dcmi");
+    if (dev == RT_NULL)
+        return -RT_ENOSYS;
+    result = rt_device_open(dev, RT_DEVICE_FLAG_RDWR);
+    if (result != RT_EOK)
         return -RT_EIO;
+    device = rt_get_dcmi_device();
+    if (device == RT_NULL || (rt_device_t)device != dev)
+    {
+        rt_device_close(dev);
+        return -RT_EIO;
+    }
+    result = rt_device_set_rx_indicate(dev, camera_dcmi_rx_indicate);
+    if (result != RT_EOK)
+    {
+        rt_device_close(dev);
+        return result;
+    }
+    hardware->device = device;
+    hardware->handle = &device->handle;
+    hardware->hdma = &device->hdma;
+    camera_dcmi_clear_device_error(hardware);
+    /* Board bring-up (power rail and camera reset through the board's IO
+     * expander). The SDK ships a weak no-op default. */
+    BSP_CAMERA_PowerUp();
+    /* Polarity, capture mode and the JPEG flag are programmed per transfer in
+     * camera_dcmi_prepare_locked(); park the data path until then. */
+    __HAL_DCMI_DISABLE_IT(hardware->handle, DCMI_ALL_IE);
 #if defined(CAMERA_DCMI_SERIAL_2BIT)
-    /* SPI packet mode, as programmed by the SDK's rt_hw_dcmi_spi_config(). */
-    __HAL_DCMI_TRS_IF(&hardware->handle, CAMERA_DCMI_IF_SEL);
-    __HAL_DCMI_SPI_PACKET_SIZE(&hardware->handle, CAMERA_DCMI_PACKET_SIZE);
-    __HAL_DCMI_SPI_DATA_LINE(&hardware->handle, CAMERA_DCMI_SPI_2LINE);
-    __HAL_DCMI_SPI_IS_MTKMODE(&hardware->handle, 1);
-    __HAL_DCMI_SPI_PACKTID(&hardware->handle, CAMERA_DCMI_PACKET_IDS);
-#if defined(CAMERA_SERIAL_SPI_SAMPLE_FALLING)
-    __HAL_DCMI_SPI_CLKEG(&hardware->handle, 1U);
-#else
-    __HAL_DCMI_SPI_CLKEG(&hardware->handle, 0U);
+    {
+        struct dcmi_spi_cfg spi_cfg;
+
+        /* SPI packet mode, using the SDK's own register helper. Every format
+         * value comes from the sensor driver through the bus configuration. */
+        spi_cfg.pkt_size = dcmi->serial.packet_size;
+        spi_cfg.pkt_id = dcmi->serial.packet_ids;
+        spi_cfg.spi_dataline = CAMERA_DCMI_SPI_2LINE;
+        spi_cfg.spi_clkeg = dcmi->serial.sample_falling ? DCMI_SPI_CLK_N :
+                                                          DCMI_SPI_CLK_P;
+        spi_cfg.spi_sync = dcmi->serial.sync_word;
+        rt_hw_dcmi_spi_config(dev, &spi_cfg);
+    }
+    __HAL_DCMI_TRS_IF(hardware->handle, CAMERA_DCMI_IF_SEL);
+    /* Wrong-order wires are reported by the sensor driver instead of being
+     * rewired on the flex. */
+    if (dcmi->serial.data_line_swap)
+        hardware->handle->Instance->SPI_CR |= DCMI_SPI_CR_DI_SWAP;
+    else
+        hardware->handle->Instance->SPI_CR &= ~DCMI_SPI_CR_DI_SWAP;
 #endif
-    __HAL_DCMI_SPI_SYNC(&hardware->handle, CAMERA_DCMI_SYNC_WORD);
-    /* Wrong-order wires are corrected here instead of on the flex. */
-#if defined(CAMERA_SERIAL_SPI_DI_SWAP)
-    hardware->handle.Instance->SPI_CR |= DCMI_SPI_CR_DI_SWAP;
-#else
-    hardware->handle.Instance->SPI_CR &= ~DCMI_SPI_CR_DI_SWAP;
-#endif
-#endif
-    hardware->handle.Instance->IE = 0U;
-    hardware->hdma.Init.Request = DCMI_DMA_REQUEST;
-    hardware->hdma.Init.Direction = DMA_PERIPH_TO_MEMORY;
-    hardware->hdma.Init.MemInc = DMA_MINC_ENABLE;
-    hardware->hdma.Init.PeriphDataAlignment = DMA_PDATAALIGN_WORD;
-    hardware->hdma.Init.MemDataAlignment = DMA_MDATAALIGN_WORD;
-    hardware->hdma.Init.Priority = DMA_PRIORITY_HIGH;
-#ifdef DMA_SUPPORT_DYN_CHANNEL_ALLOC
-    hardware->hdma.Init.IrqPrio = DCMI_DMA_IRQ_PRIO;
-#else
-    HAL_NVIC_SetPriority(DCMI_DMA_IRQ, DCMI_DMA_IRQ_PRIO, 0);
-    HAL_NVIC_EnableIRQ(DCMI_DMA_IRQ);
-#endif
-    HAL_NVIC_ClearPendingIRQ(DCMI_IRQn);
-    HAL_NVIC_EnableIRQ(DCMI_IRQn);
     return RT_EOK;
 }
 
@@ -548,25 +568,21 @@ static int camera_dcmi_hw_start(camera_dcmi_t *dcmi)
     rt_pm_hw_device_start();
 #endif
     dcmi->hardware_started = RT_TRUE;
-    hardware->handle.Instance->CR |= DCMI_CR_RSTB;
-    while ((hardware->handle.Instance->CR & DCMI_CR_RSTB_S) == 0U);
-    hardware->hdma.XferHalfCpltCallback = camera_dcmi_dma_half;
-    hardware->hdma.XferCpltCallback = camera_dcmi_dma_full;
-    hardware->hdma.XferErrorCallback = camera_dcmi_dma_error;
-    hardware->hdma.XferAbortCallback = camera_dcmi_dma_error;
-    if (HAL_DMA_Start_IT(&hardware->hdma, (uint32_t)&hardware->handle.Instance->DR,
-                        (uint32_t)hardware->frame_buffer, hardware->buffer_size / 4U) != HAL_OK)
-        return -RT_EIO;
+    /* The SDK start helper takes the region from the device object, so the
+     * programming done in camera_dcmi_prepare_locked() has to land there. */
+    hardware->device->frame_buffer = hardware->frame_buffer;
+    hardware->device->buffer_size = hardware->buffer_size;
+    rt_hw_dcmi_dma_start((rt_device_t)hardware->device);
     /* Dynamic allocation programs the destination burst at DMA start.
      * Apply JPEG single-word writes before capture can supply any data. */
     if (dcmi->mode == BUS_CAPTURE_MODE_JPEG)
     {
-        __HAL_DMA_DISABLE(&hardware->hdma);
-        hardware->hdma.Instance->CCR &= ~GPDMA_CCR1_DBURST_Msk;
-        __HAL_DMA_ENABLE(&hardware->hdma);
+        __HAL_DMA_DISABLE(hardware->hdma);
+        hardware->hdma->Instance->CCR &= ~GPDMA_CCR1_DBURST_Msk;
+        __HAL_DMA_ENABLE(hardware->hdma);
     }
-    hardware->handle.State = HAL_DCMI_STATE_BUSY;
-    __HAL_DCMI_CAPTURE_START(&hardware->handle);
+    hardware->handle->State = HAL_DCMI_STATE_BUSY;
+    __HAL_DCMI_CAPTURE_START(hardware->handle);
     return RT_EOK;
 }
 
@@ -577,13 +593,25 @@ static int camera_dcmi_config(bus_adapter_t *self, const bus_adapter_config_t *c
 
     if (config == RT_NULL || !camera_dcmi_mode_valid(config->mode))
         return BUS_ERR_NOT_SUPPORTED;
+#if defined(CAMERA_DCMI_SERIAL_2BIT)
+    /* The packet format is the sensor's; a driver that does not supply it would
+     * silently capture garbage, so reject the configuration instead. */
+    if (config->serial.packet_size == 0U)
+    {
+        rt_kprintf("dcmi: 2-bit serial mode needs the sensor packet format\n");
+        return BUS_ERR_INVALID;
+    }
+#endif
     result = camera_dcmi_lock(dcmi);
     if (result != RT_EOK)
         return result;
     if (dcmi->started || dcmi->dispatching)
         result = -RT_EBUSY;
     else
+    {
         dcmi->mode = config->mode;
+        dcmi->serial = config->serial;
+    }
     camera_dcmi_unlock(dcmi);
     return result;
 }
@@ -675,16 +703,19 @@ static int camera_dcmi_deinit(bus_adapter_t *self)
     result = camera_dcmi_stop_locked(dcmi);
     if (result != RT_EOK)
         goto done;
-    HAL_NVIC_DisableIRQ(DCMI_IRQn);
-    dcmi->hardware.handle.Instance->IE = 0U;
-    __HAL_DCMI_DISABLE(&dcmi->hardware.handle);
-    HAL_NVIC_ClearPendingIRQ(DCMI_IRQn);
-#ifndef DMA_SUPPORT_DYN_CHANNEL_ALLOC
-    HAL_NVIC_DisableIRQ(DCMI_DMA_IRQ);
-#endif
-    /* HAL_DMA_DeInit writes channel registers; a released dynamic channel
-     * can belong to another device. The next prepare initializes it anew. */
-    HAL_DCMI_DeInit(&dcmi->hardware.handle);
+    /* The SDK driver owns the peripheral and both interrupt vectors, so the
+     * backend only quiesces its data path and releases the device object. */
+    __HAL_DCMI_DISABLE_IT(dcmi->hardware.handle, DCMI_ALL_IE);
+    __HAL_DCMI_CAPTURE_STOP(dcmi->hardware.handle);
+    if (dcmi->hardware.device != RT_NULL)
+    {
+        rt_device_set_rx_indicate((rt_device_t)dcmi->hardware.device, RT_NULL);
+        rt_device_close((rt_device_t)dcmi->hardware.device);
+    }
+    BSP_CAMERA_PowerDown();
+    dcmi->hardware.device = RT_NULL;
+    dcmi->hardware.handle = RT_NULL;
+    dcmi->hardware.hdma = RT_NULL;
     dcmi->initialized = RT_FALSE;
     dcmi->frame_callback = RT_NULL;
     dcmi->frame_context = RT_NULL;
@@ -700,63 +731,63 @@ static int camera_dcmi_prepare_locked(camera_dcmi_t *dcmi, uint8_t *buffer,
     camera_dcmi_hw_t *hardware = &dcmi->hardware;
     uint32_t cr;
 
-    if (hardware->hdma.State != HAL_DMA_STATE_READY &&
-        hardware->hdma.State != HAL_DMA_STATE_RESET)
+    if (hardware->hdma->State != HAL_DMA_STATE_READY &&
+        hardware->hdma->State != HAL_DMA_STATE_RESET)
         return -RT_EBUSY;
-    if ((hardware->handle.Instance->CR & DCMI_CR_CAPTURE) != 0U)
+    if ((hardware->handle->Instance->CR & DCMI_CR_CAPTURE) != 0U)
         return -RT_EBUSY;
-    hardware->handle.Init.HSPolarity = DCMI_HSPOLARITY_HIGH;
+    hardware->handle->Init.HSPolarity = DCMI_HSPOLARITY_HIGH;
 #if defined(CAMERA_DCMI_SERIAL_2BIT)
-    hardware->handle.Init.VSPolarity = DCMI_VSPOLARITY_LOW;
+    hardware->handle->Init.VSPolarity = DCMI_VSPOLARITY_LOW;
 #else
-    hardware->handle.Init.VSPolarity = DCMI_VSPOLARITY_HIGH;
+    hardware->handle->Init.VSPolarity = DCMI_VSPOLARITY_HIGH;
 #endif
-    hardware->handle.Init.PCKPolarity = camera_dcmi_clock_polarity();
-    hardware->handle.Instance->IE = 0U;
-    __HAL_DCMI_TRS_IF(&hardware->handle, CAMERA_DCMI_IF_SEL);
-    __HAL_DCMI_CAP_MODE(&hardware->handle, stream ? 0U : 1U);
-    __HAL_DCMI_YUV2RGB_DISABLE(&hardware->handle);
+    hardware->handle->Init.PCKPolarity = camera_dcmi_clock_polarity(dcmi);
+    __HAL_DCMI_DISABLE_IT(hardware->handle, DCMI_ALL_IE);
+    __HAL_DCMI_TRS_IF(hardware->handle, CAMERA_DCMI_IF_SEL);
+    __HAL_DCMI_CAP_MODE(hardware->handle, stream ? 0U : 1U);
+    __HAL_DCMI_YUV2RGB_DISABLE(hardware->handle);
     hardware->frame_buffer = buffer;
     hardware->buffer_size = size;
-    cr = hardware->handle.Instance->CR & ~(DCMI_CR_HSPOL | DCMI_CR_VSPOL | DCMI_CR_PCKPOL | DCMI_CR_JPEG);
-    hardware->handle.Instance->CR = cr | hardware->handle.Init.HSPolarity |
-                                   hardware->handle.Init.VSPolarity |
-                                   hardware->handle.Init.PCKPolarity;
+    cr = hardware->handle->Instance->CR & ~(DCMI_CR_HSPOL | DCMI_CR_VSPOL | DCMI_CR_PCKPOL | DCMI_CR_JPEG);
+    hardware->handle->Instance->CR = cr | hardware->handle->Init.HSPolarity |
+                                   hardware->handle->Init.VSPolarity |
+                                   hardware->handle->Init.PCKPolarity;
     if (dcmi->mode == BUS_CAPTURE_MODE_JPEG)
-        hardware->handle.Instance->CR |= DCMI_CR_JPEG;
+        hardware->handle->Instance->CR |= DCMI_CR_JPEG;
 #if defined(CAMERA_DCMI_SERIAL_2BIT)
     /* The SPI 2-bit path leaves the DCMI request watermark at its reset value,
      * exactly like the SDK driver does: a packet is a whole line of payload,
      * so a transfer can never be left waiting for a partial FIFO tail. */
 #else
     /* JPEG ends at an arbitrary word; avoid requiring a 16-word FIFO tail. */
-    hardware->handle.Instance->DMA_CR = dcmi->mode == BUS_CAPTURE_MODE_JPEG ? 1U : 16U;
+    __HAL_DCMI_DMA_NUM(hardware->handle, dcmi->mode == BUS_CAPTURE_MODE_JPEG ? 1U : 16U);
 #endif
     /* GPDMA encodes single-word/16-word bursts as 0/3. Single-word JPEG
      * reads must keep the peripheral address fixed at the DCMI data port. */
-    hardware->hdma.Init.BurstSize = dcmi->mode == BUS_CAPTURE_MODE_JPEG ? 0U : 3U;
-    hardware->hdma.Init.PeriphInc = dcmi->mode == BUS_CAPTURE_MODE_JPEG ? DMA_PINC_DISABLE : DMA_PINC_ENABLE;
+    hardware->hdma->Init.BurstSize = dcmi->mode == BUS_CAPTURE_MODE_JPEG ? 0U : 3U;
+    hardware->hdma->Init.PeriphInc = dcmi->mode == BUS_CAPTURE_MODE_JPEG ? DMA_PINC_DISABLE : DMA_PINC_ENABLE;
 
     /* A dynamic channel can move between transfers. Restore the board's
      * preferred channel before HAL init recalculates its allocation group. */
-    hardware->hdma.Instance = DCMI_DMA_INSTANCE;
+    hardware->hdma->Instance = DCMI_DMA_INSTANCE;
     /* Continuous JPEG capture is bounded by the arena, never a wrapping
      * byte ring. Fixed-size preview frames retain circular DMA. */
-    hardware->hdma.Init.Mode = stream && dcmi->mode == BUS_CAPTURE_MODE_JPEG ?
+    hardware->hdma->Init.Mode = stream && dcmi->mode == BUS_CAPTURE_MODE_JPEG ?
                                DMA_NORMAL : DMA_CIRCULAR;
-    if (HAL_DMA_Init(&hardware->hdma) != HAL_OK)
+    if (HAL_DMA_Init(hardware->hdma) != HAL_OK)
         return -RT_EIO;
-    hardware->error = 0U;
-    hardware->handle.ErrorCode = HAL_DCMI_ERROR_NONE;
-    hardware->hdma.ErrorCode = HAL_DMA_ERROR_NONE;
-    __HAL_DCMI_CLEAR_FLAG(&hardware->handle, DCMI_FLAG_FRAMERI | DCMI_FLAG_VSYNCRI |
+    camera_dcmi_clear_device_error(hardware);
+    hardware->handle->ErrorCode = HAL_DCMI_ERROR_NONE;
+    hardware->hdma->ErrorCode = HAL_DMA_ERROR_NONE;
+    __HAL_DCMI_CLEAR_FLAG(hardware->handle, DCMI_FLAG_FRAMERI | DCMI_FLAG_VSYNCRI |
                          DCMI_FLAG_LINERI | DCMI_FLAG_ERRRI | DCMI_FLAG_OVRRI |
                          DCMI_ISC_PACK_SIZE_ERR_ISC);
-    __HAL_DCMI_ENABLE_IT(&hardware->handle, DCMI_IE_FRAME_IE | DCMI_IE_OVR_IE |
+    __HAL_DCMI_ENABLE_IT(hardware->handle, DCMI_IE_FRAME_IE | DCMI_IE_OVR_IE |
                         DCMI_IE_FSM_ERR_IE | DCMI_IE_PACK_SIZE_ERR_IE |
                         DCMI_IE_VSYNC_IE);
-    __HAL_DCMI_DISABLE_IT(&hardware->handle, DCMI_IE_LINE_IE);
-    __HAL_DCMI_ENABLE(&hardware->handle);
+    __HAL_DCMI_DISABLE_IT(hardware->handle, DCMI_IE_LINE_IE);
+    __HAL_DCMI_ENABLE(hardware->handle);
 
     return RT_EOK;
 }
@@ -773,7 +804,7 @@ static int camera_dcmi_arm_stream_locked(camera_dcmi_t *dcmi)
                                         dcmi->dma_size, RT_TRUE);
     if (result != RT_EOK)
         return result;
-    SCB_CleanInvalidateDCache_by_Addr((uint32_t *)dcmi->stream.buffers[0], (int32_t)dcmi->dma_size);
+    SCB_InvalidateDCache_by_Addr((uint32_t *)dcmi->stream.buffers[0], (int32_t)dcmi->dma_size);
     level = rt_hw_interrupt_disable();
     dcmi->error_pending = RT_FALSE;
     dcmi->capture_closing = RT_FALSE;
@@ -781,8 +812,8 @@ static int camera_dcmi_arm_stream_locked(camera_dcmi_t *dcmi)
     rt_hw_interrupt_enable(level);
     result = camera_dcmi_hw_start(dcmi);
     if (result == RT_EOK && dcmi->error == 0 &&
-        (hardware->hdma.State != HAL_DMA_STATE_BUSY ||
-         hardware->hdma.ErrorCode != HAL_DMA_ERROR_NONE))
+        (hardware->hdma->State != HAL_DMA_STATE_BUSY ||
+         hardware->hdma->ErrorCode != HAL_DMA_ERROR_NONE))
         result = -RT_EIO;
     return result;
 }
@@ -1034,7 +1065,6 @@ static int camera_dcmi_start_capture_internal(bus_adapter_t *self, void *buffer,
         result = camera_dcmi_prepare_locked(dcmi, buffer, size, frames != 0U);
         if (result != RT_EOK)
             goto done;
-        SCB_CleanInvalidateDCache_by_Addr((uint32_t *)buffer, (int32_t)size);
         level = rt_hw_interrupt_disable();
         dcmi->single_buffer = buffer;
         dcmi->single_size = size;
@@ -1049,8 +1079,8 @@ static int camera_dcmi_start_capture_internal(bus_adapter_t *self, void *buffer,
         dcmi->started = RT_TRUE;
         rt_hw_interrupt_enable(level);
         result = camera_dcmi_hw_start(dcmi);
-        if (result == RT_EOK && (hardware->hdma.State != HAL_DMA_STATE_BUSY ||
-                                hardware->hdma.ErrorCode != HAL_DMA_ERROR_NONE))
+        if (result == RT_EOK && (hardware->hdma->State != HAL_DMA_STATE_BUSY ||
+                                hardware->hdma->ErrorCode != HAL_DMA_ERROR_NONE))
             result = -RT_EIO;
         if (result != RT_EOK)
         {
@@ -1087,22 +1117,22 @@ static rt_bool_t camera_dcmi_single_drained(camera_dcmi_t *dcmi)
     rt_bool_t ready = RT_FALSE;
     rt_base_t level = rt_hw_interrupt_disable();
 
-    if (hardware->hdma.State == HAL_DMA_STATE_BUSY &&
-        (hardware->handle.Instance->FIFO_SR & DCMI_FIFO_SR_FIFO_CNT) == 0U)
+    if (hardware->hdma->State == HAL_DMA_STATE_BUSY &&
+        (hardware->handle->Instance->FIFO_SR & DCMI_FIFO_SR_FIFO_CNT) == 0U)
     {
-        remaining = ((GPDMA_Channel_TypeDef *)hardware->hdma.Instance)->CSR & GPDMA_CSR1_DSTNDT_Msk;
+        remaining = camera_dcmi_dma_writes_left(hardware);
         if (dcmi->burst_frames != 0U)
         {
-            uint32_t reads_left = __HAL_DMA_GET_COUNTER(&hardware->hdma);
+            uint32_t reads_left = __HAL_DMA_GET_COUNTER(hardware->hdma);
 
             __DMB();
             /* JPEG_BYTE has no documented cumulative-frame semantics.
              * Use the non-wrapping DMA destination position instead. */
             ready = remaining != 0U && remaining < words && reads_left == remaining &&
-                    (((GPDMA_Channel_TypeDef *)hardware->hdma.Instance)->CSR &
+                    (((GPDMA_Channel_TypeDef *)hardware->hdma->Instance)->CSR &
                      (GPDMA_CSR1_DSTNDT_Msk | GPDMA_CSR1_BUSERR_Msk | GPDMA_CSR1_CFGERR_Msk)) == remaining &&
-                    __HAL_DMA_GET_COUNTER(&hardware->hdma) == reads_left &&
-                    (hardware->handle.Instance->FIFO_SR & DCMI_FIFO_SR_FIFO_CNT) == 0U;
+                    __HAL_DMA_GET_COUNTER(hardware->hdma) == reads_left &&
+                    (hardware->handle->Instance->FIFO_SR & DCMI_FIFO_SR_FIFO_CNT) == 0U;
             if (ready)
                 dcmi->single_received = (words - remaining) * 4U;
         }
@@ -1139,10 +1169,10 @@ static void camera_dcmi_single_work(struct rt_work *work, void *parameter)
         burst_count = dcmi->burst_count;
         error = dcmi->error;
         if ((burst_frames != 0U && (burst_count != burst_frames ||
-                                   hardware->hdma.State != HAL_DMA_STATE_BUSY)) ||
-            hardware->error != 0U ||
-            hardware->handle.ErrorCode != HAL_DCMI_ERROR_NONE ||
-            hardware->hdma.ErrorCode != HAL_DMA_ERROR_NONE)
+                                   hardware->hdma->State != HAL_DMA_STATE_BUSY)) ||
+            camera_dcmi_device_error(hardware) != 0 ||
+            hardware->handle->ErrorCode != HAL_DCMI_ERROR_NONE ||
+            hardware->hdma->ErrorCode != HAL_DMA_ERROR_NONE)
             dcmi->error = error = -RT_EIO;
         if (error == 0 && !camera_dcmi_single_drained(dcmi))
         {
@@ -1162,21 +1192,21 @@ static void camera_dcmi_single_work(struct rt_work *work, void *parameter)
 
             /* Normal DMA TC and HAL errors release the dynamic channel
              * before notification. Never inspect its next owner's state. */
-            if (hardware->hdma.State == HAL_DMA_STATE_BUSY)
+            if (hardware->hdma->State == HAL_DMA_STATE_BUSY)
             {
-                reads_left = __HAL_DMA_GET_COUNTER(&hardware->hdma);
-                writes_left = ((GPDMA_Channel_TypeDef *)hardware->hdma.Instance)->CSR &
-                              GPDMA_CSR1_DSTNDT_Msk;
-                ccr = hardware->hdma.Instance->CCR;
+                reads_left = __HAL_DMA_GET_COUNTER(hardware->hdma);
+                writes_left = camera_dcmi_dma_writes_left(hardware);
+                ccr = hardware->hdma->Instance->CCR;
             }
             rt_hw_interrupt_enable(level);
             LOG_E("jpeg error=%d bytes=%u fifo=%u src_left=%u dst_left=%u",
                   error, (unsigned int)size,
-                  (unsigned int)(hardware->handle.Instance->FIFO_SR & DCMI_FIFO_SR_FIFO_CNT),
+                  (unsigned int)(hardware->handle->Instance->FIFO_SR & DCMI_FIFO_SR_FIFO_CNT),
                   (unsigned int)reads_left, (unsigned int)writes_left);
             LOG_E("jpeg dcmi_err=%x hal_err=%x dma_err=%x ccr=%08x",
-                  (unsigned int)hardware->error, (unsigned int)hardware->handle.ErrorCode,
-                  (unsigned int)hardware->hdma.ErrorCode, (unsigned int)ccr);
+                  (unsigned int)camera_dcmi_device_error(hardware),
+                  (unsigned int)hardware->handle->ErrorCode,
+                  (unsigned int)hardware->hdma->ErrorCode, (unsigned int)ccr);
         }
         callback = dcmi->frame_callback;
         context = dcmi->frame_context;
@@ -1185,9 +1215,9 @@ static void camera_dcmi_single_work(struct rt_work *work, void *parameter)
             callback = RT_NULL;
             retry_stop = RT_TRUE;
         }
-        else if (error != 0 || hardware->error != 0U ||
-                 hardware->handle.ErrorCode != HAL_DCMI_ERROR_NONE ||
-                 hardware->hdma.ErrorCode != HAL_DMA_ERROR_NONE)
+        else if (error != 0 || camera_dcmi_device_error(hardware) != 0 ||
+                 hardware->handle->ErrorCode != HAL_DCMI_ERROR_NONE ||
+                 hardware->hdma->ErrorCode != HAL_DMA_ERROR_NONE)
         {
             buffer = RT_NULL;
             size = 0U;
@@ -1198,13 +1228,24 @@ static void camera_dcmi_single_work(struct rt_work *work, void *parameter)
             if (burst_frames != 0U)
             {
                 size_t offset = 0U;
-                size_t frame_size = camera_jpeg_find_frame(buffer, size, burst_frames, &offset);
+                /* The first frame end after arming may close a frame that began
+                 * before the capture started, so the buffer can open with that
+                 * frame's tail. Keep the last image that parses as a whole JPEG
+                 * anywhere in the received span rather than counting frames from
+                 * offset zero. */
+                size_t frame_size = camera_jpeg_find_last_frame(buffer, size,
+                                                               &offset);
 
                 LOG_D("jpeg continuous frames=%u/%u received=%u offset=%u frame=%u",
                       (unsigned int)burst_count, (unsigned int)burst_frames,
                       (unsigned int)size, (unsigned int)offset, (unsigned int)frame_size);
                 if (frame_size == 0U)
                 {
+                    LOG_E("jpeg frames invalid bytes=%u soi=%02x%02x tail=%02x%02x",
+                          (unsigned int)size,
+                          size > 0U ? buffer[0] : 0, size > 1U ? buffer[1] : 0,
+                          size > 1U ? buffer[size - 2U] : 0,
+                          size > 0U ? buffer[size - 1U] : 0);
                     buffer = RT_NULL;
                     size = 0U;
                 }
@@ -1273,7 +1314,14 @@ static int camera_dcmi_start(bus_adapter_t *self)
 
 static int camera_dcmi_set_mode(bus_adapter_t *self, bus_capture_mode_t mode)
 {
-    bus_adapter_config_t config = {.mode = mode};
+    /* Keep the sensor-supplied packet format across a mode change: only the
+     * capture mode is being updated here. */
+    camera_dcmi_t *dcmi = self->priv;
+    bus_adapter_config_t config;
+
+    rt_memset(&config, 0, sizeof(config));
+    config.mode = mode;
+    config.serial = dcmi->serial;
     return camera_dcmi_config(self, &config);
 }
 

@@ -15,8 +15,8 @@ extern "C" {
 int camera_xclk_calculate_period(uint32_t timer_hz,
                                  uint32_t output_hz,
                                  uint32_t *period);
-int camera_xclk_start(int pin, uint32_t frequency_hz);
-int camera_xclk_stop(int pin);
+int camera_xclk_start(uint32_t frequency_hz);
+int camera_xclk_stop(void);
 
 #ifdef __cplusplus
 }

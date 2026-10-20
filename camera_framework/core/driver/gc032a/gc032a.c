@@ -23,6 +23,33 @@
 #define DBG_LVL DBG_LOG
 #include <rtdbg.h>
 
+/* Sensor-owned constants: the control-bus speed/timeout, the frame wait and the
+ * 2-bit serial packet format are properties of this sensor, not menu options.
+ * The I2C bus itself (and therefore its device name) belongs to the board. */
+#define GC032A_SCCB_TIMEOUT_MS   1000U
+#define GC032A_SCCB_MAX_HZ       100000U
+#define GC032A_FRAME_TIMEOUT_MS  1000U
+
+/* GC032A has no oscillator: the missing-MCLK case is a build error raised by
+ * camera_xclk.c (CAMERA_XCLK_REQUIRED / CAMERA_XCLK_ENABLE). */
+
+#if defined(CAMERA_GC032A_INTERFACE_SERIAL_2BIT)
+/* One VGA line of RGB565 payload. The DCMI packet mode uses it to tell a
+ * complete packet from a truncated one, and the marker bytes come from the
+ * sensor's serial packet format: frame start 0xca, frame end 0xb6, line start
+ * 0x80, line end 0x9d, packed low to high.
+ * The data lines are wired in the sensor's order, and GC032A clocks the payload
+ * out on the falling serial clock edge. */
+static const bus_serial_config_t s_serial_2bit =
+{
+    .packet_size = 1280U,
+    .packet_ids = 0x9d80b6caU,
+    .sync_word = 0x00ffffffU,
+    .sample_falling = 1U,
+    .data_line_swap = 0U,
+};
+#endif
+
 typedef struct
 {
     camera_sensor_runtime_t runtime;
@@ -88,19 +115,20 @@ static const gc032a_hw_config_t s_hw_config =
 {
     .sccb =
     {
-        .bus_name = CAMERA_SCCB_I2C_BUS_NAME,
-        .timeout_ms = CAMERA_SCCB_TIMEOUT_MS,
-        .max_hz = CAMERA_SCCB_MAX_HZ,
+        .bus_name = SCCB_I2C_BUS_NAME,
+        .timeout_ms = GC032A_SCCB_TIMEOUT_MS,
+        .max_hz = GC032A_SCCB_MAX_HZ,
     },
     .runtime =
     {
         .adapter_name = CAMERA_DATA_BUS_ADAPTER_NAME,
 #if defined(CAMERA_GC032A_INTERFACE_SERIAL_2BIT)
         .adapter_type = BUS_TYPE_SPI,
+        .serial = &s_serial_2bit,
 #else
         .adapter_type = BUS_TYPE_DVP,
 #endif
-        .frame_timeout_ms = CAMERA_READ_TIMEOUT_MS,
+        .frame_timeout_ms = GC032A_FRAME_TIMEOUT_MS,
         .default_config = &s_default_config,
     },
 #if defined(CAMERA_GC032A_INTERFACE_SERIAL_2BIT) && \
@@ -352,9 +380,7 @@ static int gc032a_open(void)
     }
 
     rt_memset(&s_device, 0, sizeof(s_device));
-    if (CAMERA_XCLK_PIN >= 0 &&
-        camera_xclk_start(CAMERA_XCLK_PIN,
-                          s_hw_config.xclk_frequency_hz) != CAMERA_XCLK_OK)
+    if (camera_xclk_start(s_hw_config.xclk_frequency_hz) != CAMERA_XCLK_OK)
     {
         LOG_E("XCLK start failed");
         return -RT_ERROR;
@@ -364,7 +390,7 @@ static int gc032a_open(void)
     if (ret != RT_EOK)
     {
         LOG_E("SCCB init failed: %d", ret);
-        camera_xclk_stop(CAMERA_XCLK_PIN);
+        camera_xclk_stop();
         return ret;
     }
 
@@ -373,7 +399,7 @@ static int gc032a_open(void)
     {
         LOG_E("GC032A init failed: %d", ret);
         sccb_deinit();
-        camera_xclk_stop(CAMERA_XCLK_PIN);
+        camera_xclk_stop();
         return ret;
     }
 
@@ -382,7 +408,7 @@ static int gc032a_open(void)
     {
         LOG_E("Camera runtime init failed: %d", ret);
         sccb_deinit();
-        camera_xclk_stop(CAMERA_XCLK_PIN);
+        camera_xclk_stop();
     }
     return ret;
 }
@@ -400,7 +426,7 @@ static int gc032a_close(void)
     if (ret == RT_EOK)
     {
         sccb_deinit();
-        camera_xclk_stop(CAMERA_XCLK_PIN);
+        camera_xclk_stop();
     }
     return ret;
 }

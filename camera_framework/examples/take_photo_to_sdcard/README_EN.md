@@ -19,8 +19,9 @@ msh> take_photo_async <framesize> <quality>
 
 Select a sensor under
 `Camera drivers -> Sensor settings -> Active camera sensor` in menuconfig.
-After selecting GC032A, choose either `8-bit DVP` or `2-bit SPI`. Only the
-selected sensor and data backend are compiled.
+After selecting GC032A, choose either `8-bit DVP` (SF32LB57X only; 52x/56x has
+no parallel DVP capture path) or `2-bit SPI`. Only the selected sensor and data
+backend are compiled.
 BF30A2 uses a fixed RGB565/240x320 mode.
 
 - `take_photo` queries the selected sensor capabilities. It saves `.jpg` when
@@ -29,24 +30,10 @@ BF30A2 uses a fixed RGB565/240x320 mode.
 
 ## GC032A 2-bit SPI Wiring
 
-All GC032A serial examples in this repository use a GPTIM1 external clock to
-trigger GPIO-DMA, so the `handle` test and this example share one wiring
-layout. SPI1 remains dedicated to the on-board TF card.
-
-| GC032A module pin | SF32LB52 board | Purpose |
-| --- | --- | --- |
-| GND (1, 10) | GND | Common ground |
-| 3V3 (2) | 3V3 | Power |
-| IIC_SDA (3) | PA33 | SCCB / I2C1 SDA |
-| IIC_SCL (4) | PA30 | SCCB / I2C1 SCL |
-| PWDN (5) | GND | Active operation at low level |
-| MCLK (6) | PA9 | 6 MHz XCLK |
-| SPI_CLK (7) | PA39 | GPTIM1 ETR sample clock |
-| SPI_D1 (8) | PA38 | GPIO-DMA data bit 1 |
-| SPI_D0 (9) | PA37 | GPIO-DMA data bit 0 |
-
-PA37 and PA38 are sampled together on each PA39 edge. SPI2 is not used and no
-CS wire is required.
+The GPIO sampling (GPIO-DMA) backend that used to carry the 2-bit serial stream
+on 52x/56x has been removed. 2-bit serial capture is only available through the
+DCMI SPI packet mode on 57x, whose clock and data pads are muxed by the board's
+`bsp_pinmux.c`; this example does not wire any pad itself.
 
 Parameters:
 
@@ -106,6 +93,6 @@ Important:
 
 ## Notes
 
-- SCCB / DVP or 2-bit SPI / XCLK pin muxing is handled by the camera framework
+- SCCB / SPI / XCLK pin muxing is owned by the board's `bsp_pinmux.c`; the camera framework never calls `HAL_PIN_Set()` and carries no pin option
 - `camera_change_settings()` already includes the required AEC/AWB settle delay internally
 - if you see `sd card not found` or mount failures, first check the `sd0` device, filesystem format, and board wiring

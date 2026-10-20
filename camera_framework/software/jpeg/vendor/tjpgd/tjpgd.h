@@ -8,16 +8,19 @@
 extern "C" {
 #endif
 
-#ifndef LVSF_USING_SJPG
-    #define LVSF_USING_SJPG 0
-#endif
-#ifndef LV_USE_SJPG
-    #define LV_USE_SJPG 0
-#endif
-
-#if LV_USE_SJPG || LVSF_USING_SJPG
-
+/*
+ * This is the camera_framework private fork of TJpgDec. It must always be
+ * compiled against this directory's tjpgdcnf.h (RGB565, JD_SZBUF 2048,
+ * JD_FASTDECODE 1). The LVGL v8 sjpg copy in the SDK uses different settings
+ * and exports the same upstream names, so this copy keeps its own symbols
+ * (camera_fw_jd_*) and refuses to build against a foreign configuration.
+ */
 #include "tjpgdcnf.h"
+
+#ifndef CAMERA_SW_TJPGD_CONF
+#error "tjpgd.h resolved a foreign tjpgdcnf.h; use ../../vendor/tjpgd/tjpgd.h"
+#endif
+
 #include <string.h>
 #include <stdint.h>
 
@@ -90,18 +93,16 @@ struct JDEC
 };
 
 
-/* TJpgDec API functions */
-JRESULT jd_prepare_ex(JDEC *jd, size_t (*infunc)(JDEC *, uint8_t *, size_t), void *pool, size_t sz_pool, void *dev, int only_header);
-JRESULT jd_decomp(JDEC *jd, int (*outfunc)(JDEC *, void *, JRECT *), uint8_t scale);
+/* TJpgDec API functions, namespaced to camera_framework (see file header) */
+JRESULT camera_fw_jd_prepare_ex(JDEC *jd, size_t (*infunc)(JDEC *, uint8_t *, size_t), void *pool, size_t sz_pool, void *dev, int only_header);
+JRESULT camera_fw_jd_decomp(JDEC *jd, int (*outfunc)(JDEC *, void *, JRECT *), uint8_t scale);
 
-static inline JRESULT jd_prepare(JDEC *jd, size_t (*infunc)(JDEC *, uint8_t *, size_t), void *pool, size_t sz_pool, void *dev)
+static inline JRESULT camera_fw_jd_prepare(JDEC *jd, size_t (*infunc)(JDEC *, uint8_t *, size_t), void *pool, size_t sz_pool, void *dev)
 {
-    return jd_prepare_ex(jd, infunc, pool, sz_pool, dev, 0);
+    return camera_fw_jd_prepare_ex(jd, infunc, pool, sz_pool, dev, 0);
 }
 
 #define JD_ALIGN(size, align)   (((size) + (align) - 1) & ~((align) - 1))
-
-#endif /*LV_USE_SJPG || LVSF_USING_SJPG*/
 
 #ifdef __cplusplus
 }

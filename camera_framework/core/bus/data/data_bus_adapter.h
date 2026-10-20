@@ -67,8 +67,22 @@ typedef enum {
     BUS_CAPTURE_MODE_RGB565 = 3,  /* RGB565 fixed-size capture                      */
 } bus_capture_mode_t;
 
+/* Sensor-owned serial (2-bit) packet format.
+ *
+ * These values describe how the sensor frames its serial payload, so the
+ * sensor driver supplies them; a backend must not invent defaults. They are
+ * only meaningful for the DCMI SPI packet mode. */
+typedef struct {
+    uint16_t packet_size;   /* payload bytes of one line; 0 = not supplied */
+    uint32_t packet_ids;    /* frame start/end, line start/end markers */
+    uint32_t sync_word;     /* 24-bit pattern to hunt the first boundary */
+    uint8_t sample_falling; /* sample the payload on the falling clock edge */
+    uint8_t data_line_swap; /* DI1 is the first data line, DI0 the second */
+} bus_serial_config_t;
+
 typedef struct {
     bus_capture_mode_t mode;
+    bus_serial_config_t serial; /* ignored unless the backend samples serial */
 } bus_adapter_config_t;
 
 /* Error codes returned by bus_adapter_* APIs.

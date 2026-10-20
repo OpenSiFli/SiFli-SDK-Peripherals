@@ -36,10 +36,8 @@ typedef struct
 {
     rt_tick_t window_start;
     uint32_t samples;
-    uint32_t src_clean_ms;
     uint32_t blend_ms;
     uint32_t wait_ms;
-    uint32_t invalidate_ms;
     uint32_t dst_clean_ms;
     uint32_t push_ms;
 } camera_display_timing_t;
@@ -66,10 +64,8 @@ static void camera_display_report_timing(void)
 {
     rt_tick_t now = rt_tick_get();
 
-    display_timing.src_clean_ms += display_stage.src_clean_ms;
     display_timing.blend_ms += display_stage.blend_ms;
     display_timing.wait_ms += display_stage.wait_ms;
-    display_timing.invalidate_ms += display_stage.invalidate_ms;
     display_timing.dst_clean_ms += display_stage.dst_clean_ms;
     display_timing.push_ms += display_stage.push_ms;
     display_timing.samples++;
@@ -78,26 +74,34 @@ static void camera_display_report_timing(void)
          rt_tick_from_millisecond(CAMERA_DISPLAY_TIMING_INTERVAL_MS)))
         return;
 
-    rt_kprintf("camera: stage n=%u clean=%u blend=%u wait=%u inv=%u "
-               "dclean=%u push=%u ms\n",
+    rt_kprintf("camera: stage n=%u dclean=%u blend=%u wait=%u push=%u ms\n",
                (unsigned)display_timing.samples,
-               (unsigned)(display_timing.src_clean_ms / display_timing.samples),
+               (unsigned)(display_timing.dst_clean_ms / display_timing.samples),
                (unsigned)(display_timing.blend_ms / display_timing.samples),
                (unsigned)(display_timing.wait_ms / display_timing.samples),
-               (unsigned)(display_timing.invalidate_ms /
-                          display_timing.samples),
-               (unsigned)(display_timing.dst_clean_ms / display_timing.samples),
                (unsigned)(display_timing.push_ms / display_timing.samples));
     display_timing = (camera_display_timing_t){.window_start = now};
 }
 
-static int camera_display_submit(void)
+/*
+ * Hand the preview buffer to the panel.
+ *
+ * Only a buffer the CPU wrote (the memset and the overlay text) has dirty
+ * lines to write back before the panel DMAs it out. A buffer the GPU just
+ * produced is already in PSRAM and the EPIC driver invalidates it when the
+ * operation completes, so cleaning it here would walk the whole buffer for
+ * nothing.
+ */
+static int camera_display_submit(rt_bool_t cpu_written)
 {
     rt_tick_t started = rt_tick_get();
-    rt_tick_t after_clean;
+    rt_tick_t after_clean = started;
 
-    mpu_dcache_clean(preview_buffer, CAMERA_DISPLAY_BUFFER_SIZE);
-    after_clean = rt_tick_get();
+    if (cpu_written)
+    {
+        mpu_dcache_clean(preview_buffer, CAMERA_DISPLAY_BUFFER_SIZE);
+        after_clean = rt_tick_get();
+    }
     preview_ops->set_window(0, 0, CAMERA_DISPLAY_WIDTH - 1,
                             CAMERA_DISPLAY_HEIGHT - 1);
     preview_ops->draw_rect((const char *)preview_buffer, 0, 0,
@@ -137,7 +141,7 @@ int camera_display_open(uint8_t *buffer, uint32_t buffer_size)
 
     preview_buffer = buffer;
     memset(preview_buffer, 0, CAMERA_DISPLAY_BUFFER_SIZE);
-    return camera_display_submit();
+    return camera_display_submit(RT_TRUE);
 
 error:
     camera_display_close();
@@ -153,7 +157,6 @@ static int camera_display_render(const camera_frame_t *display_frame)
     preview_geometry_t geometry;
     rt_err_t result;
     rt_tick_t started;
-    rt_tick_t after_clean;
     rt_tick_t after_blend;
     rt_tick_t after_wait;
 
@@ -215,8 +218,6 @@ static int camera_display_render(const camera_frame_t *display_frame)
     output.alpha = 255;
 
     started = rt_tick_get();
-    mpu_dcache_clean(display_frame->data, display_frame->size);
-    after_clean = rt_tick_get();
     if (preview_background)
         result = drv_epic_blend(input, 2, &output, RT_NULL);
     else
@@ -227,12 +228,8 @@ static int camera_display_render(const camera_frame_t *display_frame)
     if (drv_epic_wait_done() != RT_EOK)
         return -1;
     after_wait = rt_tick_get();
-    mpu_dcache_invalidate(preview_buffer, CAMERA_DISPLAY_BUFFER_SIZE);
-    display_stage.src_clean_ms = camera_display_ms(after_clean - started);
-    display_stage.blend_ms = camera_display_ms(after_blend - after_clean);
+    display_stage.blend_ms = camera_display_ms(after_blend - started);
     display_stage.wait_ms = camera_display_ms(after_wait - after_blend);
-    display_stage.invalidate_ms =
-        camera_display_ms(rt_tick_get() - after_wait);
     return 0;
 }
 
@@ -294,7 +291,7 @@ int camera_display_show(const camera_frame_t *frame, uint32_t *decode_ms,
     started = rt_tick_get();
     if (camera_display_render(frame) != 0)
         return -1;
-    if (camera_display_submit() != 0)
+    if (camera_display_submit(RT_FALSE) != 0)
         return -1;
     camera_display_report_timing();
     if (write_ms != RT_NULL)
@@ -319,7 +316,7 @@ int camera_display_show_photo(const uint8_t *jpeg, uint32_t jpeg_size,
         return -1;
     photo_overlay_draw(preview_buffer, CAMERA_DISPLAY_WIDTH,
                        CAMERA_DISPLAY_HEIGHT, filename, RT_NULL);
-    return camera_display_submit();
+    return camera_display_submit(RT_TRUE);
 }
 
 int camera_display_show_message(const char *filename, const char *message)
@@ -331,7 +328,7 @@ int camera_display_show_message(const char *filename, const char *message)
     if (photo_overlay_draw(preview_buffer, CAMERA_DISPLAY_WIDTH,
                            CAMERA_DISPLAY_HEIGHT, filename, message) != 0)
         return -1;
-    return camera_display_submit();
+    return camera_display_submit(RT_TRUE);
 }
 
 void camera_display_close(void)
