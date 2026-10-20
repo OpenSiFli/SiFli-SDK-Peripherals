@@ -17,9 +17,12 @@ if CAMERA_SW_JPEG_ENCODER:
     paths += [os.path.join(cwd, 'vendor/jpegenc')]
     defines += ['JPEGENC_PORTABLE']
 if CAMERA_SW_JPEG_DECODER:
+    # The decoder includes its vendored tjpgd.h by relative path so that it
+    # always picks up vendor/tjpgd/tjpgdcnf.h. Do NOT add vendor/tjpgd to
+    # CPPPATH and do NOT define LV_USE_SJPG here: the build system appends
+    # these to the global environment, which would collide with LVGL v8's own
+    # sjpg/tjpgd.c (same upstream names, different JDEC layout).
     sources += ['src/decoder/camera_sw_jpeg_decoder.c', 'vendor/tjpgd/tjpgd.c']
-    paths += [os.path.join(cwd, 'vendor/tjpgd')]
-    defines += ['LV_USE_SJPG=1']
 
 group = DefineGroup('Camera Software JPEG', sources, depend=[],
                     CPPPATH=paths, CPPDEFINES=defines, CCFLAGS='-O2')

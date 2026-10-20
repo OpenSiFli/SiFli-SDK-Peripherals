@@ -61,9 +61,8 @@
  *
  * The first frames after a mode switch still carry the previous exposure, so
  * CAMERA_APP_STILL_WARMUP_FRAMES complete frames are received and discarded and
- * the last one is kept; the backend leaves that last JPEG at the start of the
- * arena. The receive is one hardware run, which is why the arena has to hold
- * all of them at once.
+ * the last one is kept. The receive is one hardware run, which is why the arena
+ * has to hold all of them at once.
  */
 #define CAMERA_APP_STILL_WARMUP_FRAMES 9U
 #define CAMERA_APP_STILL_FRAMES (CAMERA_APP_STILL_WARMUP_FRAMES + 1U)
@@ -94,6 +93,8 @@ L2_NON_RET_BSS_SECT(camera_app_buffers,
 L2_NON_RET_BSS_SECT_END
 
 #define CAMERA_APP_STILL_ARENA (camera_frames.dma[0])
+/* The still receive writes every warmup frame plus the kept one into the arena,
+ * so it has to hold all of them. */
 #define CAMERA_APP_STILL_CAPACITY (sizeof(camera_frames))
 
 /* The reference implementation fits its ten UXGA frames, which measure below
@@ -244,8 +245,8 @@ static rt_bool_t camera_app_caps_has_pixformat(const camera_capabilities_t *caps
 static framesize_t camera_app_pick_still_framesize(const camera_capabilities_t *caps)
 {
 #if !defined(CAMERA_DVP_BACKEND_DCMI)
-    /* Receiving a bounded sequence of JPEG frames in one hardware run is a DCMI
-     * feature; the other backends cannot hand the sensor over for a still. */
+    /* Handing the sensor over for a still is a DCMI feature; the other
+     * backends cannot do it. */
     (void)caps;
     return FRAMESIZE_INVALID;
 #else
@@ -406,8 +407,9 @@ static int camera_app_camera_open(void)
 
 #if (CAMERA_PROFILE_XCLK_HZ != 0)
     /* The framework's sensor driver started MCLK when it opened the sensor;
-     * re-drive it here to tune the frame rate for this camera profile. */
-    if (camera_xclk_start(CAMERA_XCLK_PIN, CAMERA_PROFILE_XCLK_HZ) != CAMERA_XCLK_OK)
+     * re-drive it here to tune the frame rate for this camera profile. The PWM
+     * device and channel stay the board's, so only the frequency is passed. */
+    if (camera_xclk_start(CAMERA_PROFILE_XCLK_HZ) != CAMERA_XCLK_OK)
         rt_kprintf("camera: xclk override to %u Hz failed\n",
                    (unsigned)CAMERA_PROFILE_XCLK_HZ);
 #endif
@@ -478,6 +480,8 @@ static int camera_app_stream_wait(camera_stream_frame_t *frame)
     return 0;
 }
 
+static void camera_app_stop_still_capture(void);
+
 static void camera_capture_thread(void *parameter)
 {
     rt_bool_t stream_running = RT_TRUE;
@@ -496,10 +500,13 @@ static void camera_capture_thread(void *parameter)
              * the display thread gets the confirmation it waits for, and the
              * stream is only started again after the preview was restored. The
              * arena the still is written into is this stream's own memory, so
-             * nothing may be receiving while it is in use. */
+             * nothing may be receiving while it is in use. Both channels are
+             * released, because a capture channel left armed keeps the DCMI on
+             * its old DMA destination and the still buffer stays untouched. */
             if (stream_running)
             {
                 (void)camera_app_stream_stop();
+                camera_app_stop_still_capture();
                 stream_running = RT_FALSE;
             }
             last_capture_tick = 0;
@@ -1659,62 +1666,6 @@ static int camera_app_stats_cmd(int argc, char **argv)
 MSH_CMD_EXPORT_ALIAS(camera_app_stats_cmd, camera_stats,
                      "collect camera statistics for a time window");
 
-static int camera_sccb_scan_cmd(int argc, char **argv)
-{
-    struct rt_i2c_configuration configuration =
-    {
-        .mode = 0,
-        .addr = 0,
-        .timeout = 100,
-        .max_hz = 100000,
-    };
-    struct rt_i2c_bus_device *bus;
-    bf0_i2c_t *device;
-    uint8_t dummy = 0U;
-    uint16_t address;
-    int found = 0;
-
-    if (argc >= 3)
-    {
-        int sda = atoi(argv[1]);
-        int scl = atoi(argv[2]);
-
-        if ((sda < 0) || (sda > 95) || (scl < 0) || (scl > 95))
-        {
-            rt_kprintf("camera: invalid pin index\n");
-            return -1;
-        }
-        HAL_PIN_Set(PAD_PA00 + sda, I2C1_SDA, PIN_PULLUP, 1);
-        HAL_PIN_Set(PAD_PA00 + scl, I2C1_SCL, PIN_PULLUP, 1);
-        rt_kprintf("camera: SCCB pads SDA=PA%d SCL=PA%d\n", sda, scl);
-    }
-
-    bus = rt_i2c_bus_device_find(CAMERA_SCCB_I2C_BUS_NAME);
-    if (bus == RT_NULL)
-    {
-        rt_kprintf("camera: %s not found\n", CAMERA_SCCB_I2C_BUS_NAME);
-        return -1;
-    }
-    (void)rt_i2c_open(bus, RT_DEVICE_FLAG_RDWR);
-    (void)rt_i2c_configure(bus, &configuration);
-    /* The SDK I2C device starts with its rt_i2c_bus_device member. */
-    device = (bf0_i2c_t *)bus;
-
-    for (address = 0x08U; address < 0x78U; address++)
-    {
-        if (HAL_I2C_Master_Transmit(&device->handle, (uint16_t)(address << 1),
-                                    &dummy, 1U, 20U) == HAL_OK)
-        {
-            rt_kprintf("camera: SCCB device at 0x%02x\n", (unsigned)address);
-            found++;
-        }
-    }
-
-    rt_kprintf("camera: SCCB scan done, %d device(s)\n", found);
-    return 0;
-}
-MSH_CMD_EXPORT_ALIAS(camera_sccb_scan_cmd, camera_sccb_scan,
-                     "scan the camera SCCB bus [sda_pin scl_pin]");
 
 static int camera_photo_cmd(int argc, char **argv)
 {

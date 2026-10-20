@@ -19,8 +19,15 @@
 
 #include <rtconfig.h>
 
-#define SCCB_SCL_PIN (PAD_PA00 + CAMERA_SCCB_SCL_PIN)
-#define SCCB_SDA_PIN (PAD_PA00 + CAMERA_SCCB_SDA_PIN)
+/* The camera I2C pads are owned by the board: its bsp_pinmux.c muxes them
+ * together with the DVP/SPI pads. This layer only opens the bus by name, and
+ * the name is the board's own CAMERA_I2C_DEVICE_NAME (the same symbol the SDK
+ * boards already declare), never a framework menu option. */
+#if !defined(CAMERA_I2C_DEVICE_NAME)
+#error "board must name the camera I2C device as CAMERA_I2C_DEVICE_NAME"
+#endif
+
+#define SCCB_I2C_BUS_NAME CAMERA_I2C_DEVICE_NAME
 
 typedef struct
 {

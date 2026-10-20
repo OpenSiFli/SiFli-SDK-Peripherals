@@ -27,10 +27,9 @@
 /*
  * Byte order of a captured RGB565 frame. The DVP hardware path keeps whatever
  * order the sensor puts on the wire, and the sensors differ: OV2640 sends the
- * low byte first, GC032A the high byte first. The 2-bit GPIO sampling mode
- * packs pixels in software and always produces big endian RGB565, which is
- * also the convention of the software ISP and JPEG components; the DCMI SPI
- * 2-bit mode reconstructs the same wire order as the DVP path.
+ * low byte first, GC032A the high byte first. The DCMI SPI 2-bit mode
+ * reconstructs the same wire order as the DVP path, and big endian RGB565 is
+ * the convention of the software ISP and JPEG components.
  * A new camera has to be checked on hardware - `camera_preview 0 0 1` flips the
  * display swap at runtime - and its order then recorded here.
  */

@@ -1,129 +1,150 @@
-# OV2640 Camera Component
+# Camera Framework
 
 [中文](README.md) | [English](README_EN.md)
 
-RT-Thread based OV2640 camera component for the SiFli SF32LB52/SF32LB56 platform. The component is built around a layered architecture: sensor driver, DVP data bus (with a generic bus-adapter abstraction), and a generic handle layer. Frame buffers are supplied by the caller — the component does not reserve any PSRAM. Upper-layer applications drive the camera through the handle-layer API.
+RT-Thread camera framework for the SiFli SF32 series, shipped as plain sources. It contains a `camera_handle` API layer, one of three sensor drivers (OV2640 / GC032A / BF30A2, picked in Kconfig), an SCCB/I2C control bus, three data paths (DCMI parallel DVP, DCMI SPI 2-bit packet mode, ArduCam SPI FIFO), and optional software ISP/JPEG.
+
+Pin muxing, pulls, drive strength and peripheral instances belong to the board (`customer/boards/<board>/bsp_pinmux.c` + `Kconfig.board`); the framework only uses RT-Thread device names and never carries a pin or device-name option of its own. Frame buffers are supplied by the caller — the framework reserves no PSRAM.
 
 ## Current Capabilities
 
-- Supports JPEG, RGB565, YUV422, and RAW8 pixel formats
-- Supports single-shot capture
-- Supports continuous capture with double-buffer streaming
-- Supports a generic handle-layer API for future multi-camera or driver replacement scenarios
-- Supports common image controls such as frame size, quality, mirror, flip, exposure, white balance, gain, and special effects
+- One sensor driver and one data-bus backend per firmware image (see `SConscript`)
+- Pixel formats: JPEG, RGB565, YUV422, RAW8
+- Single-shot capture: blocking, with optional timeout, or asynchronous with a completion callback
+- Bounded JPEG burst capture (`camera_capture_frames_timeout()`, keeps the last frame)
+- Double-buffer streaming, plus a half-frame mode driven by DMA HT/TC events
+- Frame validity query (`camera_stream_frame_is_valid()`) so a consumer can tell whether a dequeued descriptor still describes live data
+- Capability query, unified status codes, 0/180 degree rotation
+- Image controls are limited to what the sensor driver implements: frame size, quality and rotation. There is no global mirror/flip/exposure/white-balance/gain API.
 
 ## Directory Layout
 
 ```text
-ov2640/
-├── camera/
-│   ├── bus/
-│   │   ├── control/
-│   │   │   ├── sccb.c              # SCCB (I2C) control bus
-│   │   │   └── sccb.h
-│   │   └── data/
-│   │       ├── data_bus_adapter.c  # Generic data-bus adapter abstraction
-│   │       ├── data_bus_adapter.h
-│   │       ├── dvp.c               # DVP DMA capture backend
-│   │       └── dvp.h
+camera_framework/
+├── Kconfig                  sensor / transport / software ISP+JPEG (no pin, no device name)
+├── SConscript               source selection (one backend + one driver per config)
+├── core/
+│   ├── handle/             camera_handle.[ch] (public API), camera_handle_internal.h
 │   ├── driver/
-│   │   └── ov2640/
-│   │       ├── ov2640.c            # OV2640 RT-Thread device driver
-│   │       ├── ov2640.h            # Control-command macros and public API
-│   │       ├── ov2640_regs.h       # Register address definitions
-│   │       └── ov2640_settings.h   # Register initialization sequences
-│   ├── handle/
-│   │   ├── camera_handle.c         # High-level handle API implementation
-│   │   └── camera_handle.h         # Type definitions and API declarations
-
-├── examples/
-│   ├── take_photo/                  # RGB565 single-shot MSH command example
-│   └── take_photo_to_sdcard/        # Capture and save to SD card example
-├── Kconfig
-├── SConscript
+│   │   ├── camera_driver_desc.[ch]      driver link section and discovery
+│   │   ├── camera_sensor_runtime.[ch]   shared capture/stream logic
+│   │   ├── camera_jpeg_assembler.[ch]   JPEG frame assembly
+│   │   └── {ov2640,gc032a,bf30a2}/      sensor drivers and register tables
+│   └── bus/
+│       ├── control/sccb.[ch]            control bus (I2C)
+│       └── data/
+│           ├── data_bus_adapter.[ch]    registry and wrapper API
+│           ├── camera_xclk.[ch]         MCLK (drives only the board's PWM)
+│           ├── camera_xclk_calc.c       MCLK period calculation
+│           ├── dcmi.c                   SDK DCMI: parallel DVP / 2-bit SPI packet mode
+│           └── arducam_fifo*.c          SPI FIFO module backend
+├── software/{isp,jpeg}/    software ISP and JPEG codecs (vendored sources included)
+├── examples/               runnable examples
+├── tests/                  static checks and on-target tests
 ├── README.md
-└── README_EN.md
+├── README_EN.md
+└── develop.md              developer handbook (architecture, Kconfig, API, adding a sensor/bus)
 ```
 
 ## Architecture
 
 ```text
-┌────────────────────────────────────────────────────┐
-│               Application / Example Layer          │
-│         camera_handle_* APIs / MSH                 │
-└───────────────────────┬────────────────────────────┘
-                        │
-┌───────────────────────▼────────────────────────────┐
-│              handle layer: camera_handle           │
-│  camera_device_ops_t (compile-time binding)        │
-└───────────────────────┬────────────────────────────┘
-                        │
-┌───────────────────────▼────────────────────────────┐
-│         OV2640 driver layer: camera/driver         │
-│     DVP resource init and frame dispatching        │
-└───────────────────────┬────────────────────────────┘
-                        │
-┌───────────────────────▼────────────────────────────┐
-│            DVP data layer: camera/bus/data         │
-│ GPIO + GPTIM + DMA, JPEG parsing, rearm for stream │
-└───────────────────────┬────────────────────────────┘
-                        │
-                     OV2640 hardware
+Application / example
+    │  camera_handle.h only
+    ▼
+camera_handle            instance state machine, API mutex, stream queue, drop counters
+    │  camera_device_ops_t (function table, one implementation per build)
+    ▼
+sensor driver + camera_sensor_runtime
+    │  bus_adapter_ops_t, sccb.h, camera_xclk.h
+    ▼
+data-bus backend (dcmi / arducam_fifo) + control bus (sccb) + MCLK (camera_xclk)
+    │  RT-Thread device API: find "dcmi" / "pwmt2" / "i2c1" / "spiN" by name
+    ▼
+SDK / board (bsp_pinmux.c, drv_dcmi.c, drv_pwm, drv_i2c, drv_spi)
 ```
+
+The dependency is strictly one-way downwards: no lower layer calls back into the handle, and the framework never writes board state.
 
 ## Hardware Connections
 
 | OV2640 Pin | MCU Pin | Function | Notes |
 |------------|---------|----------|-------|
-| D0 ~ D7 | Platform default data pin group | 8-bit parallel data | Applied through DVP default resource macros |
-| PCLK | Default PA41 | Pixel clock | Default DVP mapping to GPTIM1_ETR |
-| HSYNC/HREF | Default PA43 | Line sync | Default DVP mapping to GPTIM1_CH1 |
-| VSYNC | Configured by Kconfig | Frame sync | Used as frame trigger interrupt |
-| SDA | Default PA39 | SCCB data | Must be configured before open |
-| SCL | Default PA40 | SCCB clock | Must be configured before open |
-| XCLK | Default PA08 | Sensor clock input | Optional GPTIM2_CH1 output |
+| D0 ~ D7 | Muxed by the board (`bsp_pinmux.c`) | 8-bit parallel data | Owned by the SF32LB57X DCMI backend |
+| PCLK | Muxed by the board (`bsp_pinmux.c`) | Pixel clock | DCMI samples the rising PCLK edge by default |
+| HSYNC/HREF | Muxed by the board (`bsp_pinmux.c`) | Line sync | Owned by the SF32LB57X DCMI backend |
+| VSYNC | Muxed by the board (`bsp_pinmux.c`) | Frame sync | Owned by the SF32LB57X DCMI backend |
+| SDA | Muxed by the board (`bsp_pinmux.c`) | SCCB data | The board owns the pad; the framework only opens `CAMERA_I2C_DEVICE_NAME` |
+| SCL | Muxed by the board (`bsp_pinmux.c`) | SCCB clock | Same as SDA |
+| XCLK | Muxed by the board (`bsp_pinmux.c`) | Sensor clock input | The board names the PWM device/channel (`CAMERA_XCLK_PWM_DEVICE_NAME` / `_CHANNEL`); a module with its own oscillator declares `CAMERA_XCLK_EXTERNAL_OSC` instead of `CAMERA_XCLK_ENABLE` |
 
 Notes:
 
-- DVP hardware resources are initialized inside the DVP backend from board macros; OV2640 accesses DVP only through the bus-adapter layer
-- Pin muxing for SCCB (I2C), DVP (PCLK / HSYNC), and XCLK is handled internally during initialization — the application does not need to call `HAL_PIN_Set()`
+- Parallel DVP is available only on SF32LB57X and only through the SDK's `dcmi` device driver; OV2640 accesses DVP only through the bus-adapter layer
+- **Every pad is the board's.** `bsp_pinmux.c` muxes the DVP/SPI pads, the MCLK pad and the camera I2C pads; the framework calls no `HAL_PIN_*` and carries no pin or device-name option of its own — it only uses the RT-Thread device names the board declares
+- `SCCB settings` no longer exists as a menu: the bus name is the board's `CAMERA_I2C_DEVICE_NAME`, and the SCCB timeout/clock rate are constants inside each sensor driver
 
 ## Kconfig Options
 
 All options are nested under `Camera drivers`, then configure:
 
 - `Sensor settings` -> `Use OV2640` -> `OV2640 settings`
-- `SCCB settings`
-- `Data bus settings` -> `Use DVP`
+- `Data bus settings`
 
-### OV2640 settings
+There is no `SCCB settings` menu and no pin option: see below.
+
+### Sensor settings
 
 | Option | Default | Range | Description |
 |--------|---------|-------|-------------|
-| `CAMERA_READ_TIMEOUT_MS` | 1000 | 100–10000 | Single-shot capture wait timeout (ms) |
+| `SENSOR_USING_OV2640` / `_GC032A` / `_BF30A2` | OV2640 | — | The one sensor driver compiled into this firmware |
+
+> The frame-wait timeout is **not** a menu option: each driver carries its own
+> constant (`OV2640_FRAME_TIMEOUT_MS`, `GC032A_FRAME_TIMEOUT_MS`,
+> `BF30A2_FRAME_TIMEOUT_MS`, `ARDUCAM_FIFO_FRAME_WAIT_MS`).
 
 ### SCCB settings
 
-| Option | Default | Range | Description |
-|--------|---------|-------|-------------|
-| `CAMERA_SCCB_I2C_BUS_NAME` | `"i2c1"` | — | RT-Thread I2C bus device name |
-| `CAMERA_SCCB_TIMEOUT_MS` | 1000 | — | I2C transaction timeout (ms) |
-| `CAMERA_SCCB_MAX_HZ` | 100000 | 10000–400000 | I2C maximum frequency (Hz) |
+There is no `SCCB settings` menu. The camera I2C bus and its pads are board
+facts: the board names the bus as `CAMERA_I2C_DEVICE_NAME` and muxes SCL/SDA in
+its own `bsp_pinmux.c`. Bus timing is driver-owned
+(`OV2640_SCCB_TIMEOUT_MS` / `_MAX_HZ`, `GC032A_SCCB_TIMEOUT_MS` / `_MAX_HZ`).
 
-### Data bus settings -> Use DVP
+### Data bus settings
 
-| Option | Default | Range | Description |
-|--------|---------|-------|-------------|
-| `CAMERA_DVP_PINGPONG_POOL_SIZE` | 10240 | 1024–65536 | OV2640 driver-owned ping-pong pool size ceiling |
-| `CAMERA_DVP_PINGPONG_BUFFER_SIZE` | 8192 | 1024–65536 | DVP DMA ping-pong buffer size in bytes; minimum is row-width × 2 |
-| `CAMERA_DVP_PINGPONG_USE_SECTION` | `n` | — | Place the OV2640 driver-owned ping-pong pool in `.dvp_pingpong` |
-| `CAMERA_DVP_PCLK_PIN` | 41 | — | PCLK input pin index (PAx) |
-| `CAMERA_DVP_HSYNC_PIN` | 43 | — | HSYNC/HREF input pin index (PAx) |
-| `CAMERA_DVP_VSYNC_PIN` | 42 | — | VSYNC GPIO interrupt pin index (PAx number) |
-| `CAMERA_DVP_XCLK_PIN` | -1 | — | XCLK output pin (PAx); -1 disables |
-| `CAMERA_DVP_XCLK_FREQ` | 12 MHz | 6 / 12 MHz | XCLK frequency; derived from GPTIM2 running at 24 MHz |
+The menu follows the compiled-in sensor — it offers the transport, and the
+options change with the camera:
 
-> `CAMERA_DVP_DATA_PIN_BASE` is reserved for internal use — do not modify.
+| Sensor | Menu offers |
+|--------|-------------|
+| OV2640 | `8-bit DVP (parallel)` or `SPI (ArduCam FIFO module)` |
+| GC032A | `8-bit DVP (parallel)` or `2-bit SPI (serial)` |
+| BF30A2 | `SPI1` / `SPI2` (its stream is always SPI) |
+| OV2640 + ArduCam FIFO | additionally `SPI1` / `SPI2` for the module |
+
+| Option | Description |
+|--------|-------------|
+| `CAMERA_OV2640_INTERFACE_DVP` / `_ARDUCAM_FIFO` | 8-wire parallel bus, or SPI through an ArduCam FIFO module (a bare OV2640 has no serial pixel output) |
+| `CAMERA_GC032A_INTERFACE_DVP_8BIT` / `_SERIAL_2BIT` | 8-wire parallel bus, or GC032A's own 2-bit serial format into the DCMI SPI packet mode |
+| `CAMERA_ARDUCAM_SPI_BUS1/2` | which SPI instance the ArduCam module is read through (auto-selects that SPI driver + DMA) |
+| `CAMERA_BF30A2_SPI_BUS1/2` | which SPI instance BF30A2 streams on (auto-selects circular DMA) |
+| `CAMERA_DVP_BACKEND_DCMI` | hidden: the only parallel-DVP backend (SDK `dcmi` device driver) |
+| `CAMERA_SERIAL_SPI_2BIT` | hidden: 2-bit serial capture through the same DCMI in SPI packet mode |
+
+> Pads are never a menu option: pin muxing, pulls and drive strength come from the
+> board (`customer/boards/<board>/bsp_pinmux.c`), device labels and bus timing
+> come from the driver/backend code. Board symbols the framework consumes:
+> `CAMERA_I2C_DEVICE_NAME`, `CAMERA_XCLK_ENABLE`, `CAMERA_XCLK_PWM_DEVICE_NAME` /
+> `_CHANNEL`, `CAMERA_XCLK_EXTERNAL_OSC`, `CAMERA_DCMI_PCLK_FALLING`,
+> `CAMERA_BF30A2_RESET_PIN`.
+>
+> The dependency runs board -> framework only: the board declares what it wires
+> (optionally grouped under its own `BOARD_CAMERA_HW`), the framework reads those
+> symbols and decides whether the compiled-in sensor needs them — a sensor that
+> needs MCLK with no board declaration is a build error, not a silent no-op. No
+> board Kconfig may reference `CAMERA_FRAMEWORK_*` / `CAMERA_USING_*`. See
+> `develop.md` section 4.1, section 4.3 (a complete `Kconfig.board` example) and
+> Appendix A for the full contract.
 
 ## Usage
 
@@ -314,9 +335,8 @@ python jlinkbin2bmp.py "-if SWD -speed 12000" rgb565 320 240 0x20100000
 3. **JPEG buffer sizing**: output length is variable — allow at least 300 KB for VGA; UXGA may need 1–2 MB.
 4. **Fixed-size modes** (RGB565 / YUV422 / RAW8): buffer must be exactly `width × height × bytes_per_pixel` (RGB565/YUV422 = 2, RAW8 = 1).
 5. **After changing format or resolution**: `camera_change_settings` inserts ~500 ms internally; when using raw commands, call `rt_thread_mdelay(500)` manually.
-6. **Auto resize rule**: after a successful frame-size change in non-JPEG mode, the driver automatically updates DVP ping-pong size to `line_bytes × 2`. JPEG mode keeps its current ping-pong size.
-7. **Ping-pong pool and active size**: `CAMERA_DVP_PINGPONG_POOL_SIZE` is the compile-time ceiling; `CAMERA_DVP_PINGPONG_BUFFER_SIZE` is the initial active size.
-8. **Timeout or first-frame-only**: check VSYNC pin, PCLK / HSYNC / XCLK configuration, and DVP ping-pong buffer size first.
+6. **Auto resize rule**: after a successful frame-size change in non-JPEG mode, the driver calls the bus adapter's `set_pingpong_size` op with `line_bytes × 2`. Backends that own no ping-pong pool (for example the DCMI backend) only validate the value. JPEG mode leaves the size untouched.
+7. **Timeout or first-frame-only**: check the VSYNC/PCLK/HSYNC pad muxing in the board's `bsp_pinmux.c` and the XCLK configuration first.
 
 ## Dependencies
 
@@ -332,11 +352,11 @@ python jlinkbin2bmp.py "-if SWD -speed 12000" rgb565 320 240 0x20100000
 
 ## SF32LB57 hardware DCMI backend
 
-Select GC032A `8-bit DVP` or OV2640 `DVP`, then choose `Hardware DCMI (HAL)` under `DVP capture backend` and disable `BSP_USING_DCMI`. This backend uses the SDK DCMI and DMA HAL directly; the framework manages capture, interrupts and JPEG frame completion. Board code configures D0-D7, PCLK, HREF and VSYNC pinmux in `HAL_DCMI_MspInit()`. SCCB and XCLK use the framework settings, and capture samples the rising PCLK edge by default.
+Select GC032A `8-bit DVP` or OV2640 `DVP` (both selectable on SF32LB57X only). Parallel DVP has a single backend — `CAMERA_DVP_BACKEND_DCMI` is a hidden symbol that defaults to `y` and automatically `select`s `BSP_USING_DCMI`, which must stay enabled. This backend uses the SDK's `dcmi` device driver: the SDK owns the peripheral, the DMA channel and the DCMI interrupt vectors, while the framework programs capture and completes JPEG frames. DMA half/full/error notifications arrive through `rt_device_set_rx_indicate`; the SDK's own `HAL_DCMI_FrameEventCallback` turns DCMI frame/overflow/packet-size events into the same notification, and the framework only overrides `HAL_DCMI_ErrorCallback`. The board's own `bsp_pinmux.c` muxes D0-D7, PCLK, HREF, VSYNC and the MCLK pad in its `BSP_USING_DCMI` block, so the application supplies no `HAL_DCMI_MspInit()`; the board's `BSP_CAMERA_PowerUp()` / `BSP_CAMERA_PowerDown()` hooks are called by the backend init/deinit. SCCB uses the board's `CAMERA_I2C_DEVICE_NAME` plus the driver's timing constants, and capture samples the rising PCLK edge by default (the board can select the falling edge with `CAMERA_DCMI_PCLK_FALLING`). On 52x/56x there is no parallel DVP capture path at all: use GC032A `2-bit SPI` or OV2640 `Arducam SPI FIFO` instead.
 
-OV2640 defaults to SVGA/RGB565 with hardware DCMI and supports native sensor JPEG capture. GPIO and ArduCAM FIFO backends retain their JPEG default. The OV2640 RGB565 settings write `0x09` to the DSP `IMAGE_MODE` register, sending the low byte of each pixel first. Applications using native RGB565 on a little-endian MCU can copy these pixels directly.
+OV2640 defaults to SVGA/RGB565 with hardware DCMI and supports native sensor JPEG capture. The ArduCAM FIFO backend retains its JPEG default. The OV2640 RGB565 settings write `0x09` to the DSP `IMAGE_MODE` register, sending the low byte of each pixel first. Applications using native RGB565 on a little-endian MCU can copy these pixels directly.
 
-`camera_start_stream()` defaults to `CAMERA_STREAM_MODE_FRAME` and submits two adjacent, 64-byte-aligned frame buffers. Each frame size must also be a multiple of 64 bytes. DMA half/full completion identifies complete frames; DCMI runs continuously without per-frame stop/restart. Existing GPIO backends retain their capture path.
+`camera_start_stream()` defaults to `CAMERA_STREAM_MODE_FRAME` and submits two adjacent, 64-byte-aligned frame buffers. Each frame size must also be a multiple of 64 bytes. DMA half/full completion identifies complete frames; DCMI runs continuously without per-frame stop/restart.
 
 `camera_get_stream_frame()` returns a borrowed descriptor. A negative `error` reports capture failure; `timestamp_ticks` records the RTOS tick at the frame event. Consumers perform any required DMA cache invalidation in thread context, then call `camera_stream_frame_is_valid()` before and after copying pixels to stable storage. Publish the copy only when both checks pass. In `FRAME` mode, the check covers generation and DMA source/destination progress; a queued descriptor alone does not guarantee that its pixels remain valid.
 

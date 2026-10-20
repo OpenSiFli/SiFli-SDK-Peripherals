@@ -1,6 +1,13 @@
 from building import *
 import os
 
+# SF-PKG entry point: this SConscript ships inside the camera_framework package
+# (sf-pkgs/full_deploy/host/camera_framework/<version>/SConscript) and is
+# executed by the SDK build through AddExternalComponents(), with a variant_dir
+# under <project>/build_*/sf-pkgs/camera_framework. SCons chdirs into this
+# recipe directory before evaluating it, so the relative paths below resolve to
+# the package's own core/ and software/ trees exactly as they do in-repo.
+
 # keep current working dir
 cwd = GetCurrentDir()
 # Collect common framework sources, one data backend and one sensor.
@@ -14,18 +21,11 @@ src = (Glob('./core/*.c') +
 include = ['./core', './core/bus/control', './core/driver', './core/bus/data', './core/handle']
 
 if GetDepend('CAMERA_USING_DVP'):
-    if GetDepend('CAMERA_DVP_BACKEND_DCMI'):
-        src += ['./core/bus/data/dcmi.c']
-    else:
-        src += ['./core/bus/data/dvp.c']
+    src += ['./core/bus/data/dcmi.c']
 elif GetDepend('CAMERA_USING_SERIAL'):
-    if GetDepend('CAMERA_SERIAL_SPI_2BIT'):
-        src += ['./core/bus/data/dcmi.c']
-    else:
-        src += ['./core/bus/data/camera_serial.c',
-                './core/bus/data/camera_serial_decoder.c',
-                './core/bus/data/camera_serial_hw.c',
-                './core/bus/data/camera_serial_packer.c']
+    # 2-bit serial capture only exists as the DCMI SPI packet mode; the GPIO
+    # sampling backend and its decoder/packer were removed.
+    src += ['./core/bus/data/dcmi.c']
 elif GetDepend('CAMERA_USING_ARDUCAM_FIFO'):
     src += ['./core/bus/data/arducam_fifo.c',
             './core/bus/data/arducam_fifo_controller.c']
@@ -40,7 +40,28 @@ elif GetDepend('SENSOR_USING_BF30A2'):
     src += Glob('./core/driver/bf30a2/*.c')
     include += ['./core/driver/bf30a2']
 
-group = DefineGroup('Drivers', src, depend = ['CAMERA_FRAMEWORK_ENABLE'], CPPPATH = include, LIBPATH = include)
+sensor_selected = (
+    GetDepend('SENSOR_USING_OV2640') or
+    GetDepend('SENSOR_USING_GC032A') or
+    GetDepend('SENSOR_USING_BF30A2')
+)
+if not sensor_selected:
+    raise Exception(
+        "CAMERA_MODEL is empty or unknown: no sensor driver was selected. "
+        "Check the model mapping in camera_framework/Kconfig."
+    )
+
+if not GetDepend('CAMERA_CONFIG_VALID'):
+    raise Exception(
+        "Unsupported CAMERA_MODEL/CAMERA_INTERFACE combination: no backend "
+        "was selected. Check the model+interface mapping in "
+        "camera_framework/Kconfig."
+    )
+
+# PKG_USING_CAMERA_FRAMEWORK is the package enable symbol. The model/interface
+# strings are defined by the SDK camera module Kconfig; this package Kconfig
+# maps them to the SENSOR_USING_* / CAMERA_* selectors used above.
+group = DefineGroup('Drivers', src, depend = ['PKG_USING_CAMERA_FRAMEWORK'], CPPPATH = include, LIBPATH = include)
 group.extend(SConscript(os.path.join(cwd, 'software/SConscript'),
                         variant_dir='software', duplicate=0))
 

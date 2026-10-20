@@ -23,21 +23,21 @@
 #define ARDUCAM_FIFO_WORKER_PRIORITY (RT_THREAD_PRIORITY_HIGH + 2)
 #define ARDUCAM_FIFO_WORKER_TICK 10U
 
-#if defined(CAMERA_ARDUCAM_SPI_BUS1)
-#define ARDUCAM_FIFO_SPI_BUS_NAME "spi1"
-#define ARDUCAM_FIFO_SPI_DIO_FUNCTION SPI1_DIO
-#define ARDUCAM_FIFO_SPI_DI_FUNCTION SPI1_DI
-#define ARDUCAM_FIFO_SPI_CLK_FUNCTION SPI1_CLK
-#define ARDUCAM_FIFO_SPI_CS_FUNCTION SPI1_CS
-#elif defined(CAMERA_ARDUCAM_SPI_BUS2)
-#define ARDUCAM_FIFO_SPI_BUS_NAME "spi2"
-#define ARDUCAM_FIFO_SPI_DIO_FUNCTION SPI2_DIO
-#define ARDUCAM_FIFO_SPI_DI_FUNCTION SPI2_DI
-#define ARDUCAM_FIFO_SPI_CLK_FUNCTION SPI2_CLK
-#define ARDUCAM_FIFO_SPI_CS_FUNCTION SPI2_CS
-#else
-#error "Arducam FIFO SPI bus is not selected"
+/* The SPI pads belong to the board: bsp_pinmux.c muxes SCLK/DIO/DI/CS. Which
+ * SPI instance the module sits on is picked in the Data bus menu
+ * (CAMERA_ARDUCAM_SPI_BUS1/2 -> CAMERA_ARDUCAM_SPI_BUS_NAME); the device label,
+ * clock rate, FIFO scratch size, worker stack and frame wait are backend
+ * constants. */
+#if !defined(CAMERA_ARDUCAM_SPI_BUS_NAME)
+#error "the ArduCam FIFO SPI bus choice is missing (CAMERA_ARDUCAM_SPI_BUS_NAME)"
 #endif
+
+#define ARDUCAM_FIFO_SPI_BUS_NAME CAMERA_ARDUCAM_SPI_BUS_NAME
+#define ARDUCAM_FIFO_SPI_DEVICE_NAME "arducam"
+#define ARDUCAM_FIFO_SPI_MAX_HZ 8000000U
+#define ARDUCAM_FIFO_SCRATCH_SIZE 8192U
+#define ARDUCAM_FIFO_WORKER_STACK_SIZE 2048U
+#define ARDUCAM_FIFO_FRAME_WAIT_MS 30000U
 
 typedef struct
 {
@@ -68,7 +68,7 @@ typedef struct
     uint32_t size;
 } arducam_fifo_writer_t;
 
-static uint8_t s_arducam_fifo_scratch[CAMERA_ARDUCAM_FIFO_SCRATCH_SIZE]
+static uint8_t s_arducam_fifo_scratch[ARDUCAM_FIFO_SCRATCH_SIZE]
     __attribute__((aligned(64)));
 static arducam_fifo_handle_t s_arducam_fifo_handle;
 static const bus_adapter_ops_t s_arducam_fifo_ops;
@@ -268,7 +268,7 @@ static void arducam_fifo_worker(void *parameter)
             &s_arducam_fifo_controller_ops, &writer, mode, expected_raw_size,
             s_arducam_fifo_scratch, sizeof(s_arducam_fifo_scratch),
             arducam_fifo_write, &writer, &captured_size,
-            CAMERA_READ_TIMEOUT_MS);
+            ARDUCAM_FIFO_FRAME_WAIT_MS);
 
         if (rt_mutex_take(handle->lock, RT_WAITING_FOREVER) != RT_EOK)
             continue;
@@ -300,7 +300,7 @@ static int arducam_fifo_create_worker(arducam_fifo_handle_t *handle)
         return BUS_ERR_HW;
     }
     handle->worker = rt_thread_create("ardufifo", arducam_fifo_worker,
-                                      handle, CAMERA_ARDUCAM_FIFO_WORKER_STACK_SIZE,
+                                      handle, ARDUCAM_FIFO_WORKER_STACK_SIZE,
                                       ARDUCAM_FIFO_WORKER_PRIORITY,
                                       ARDUCAM_FIFO_WORKER_TICK);
     if (handle->worker == RT_NULL)
@@ -349,25 +349,16 @@ static int arducam_fifo_init_spi(arducam_fifo_handle_t *handle)
     {
         .mode = RT_SPI_MODE_0 | RT_SPI_MSB | RT_SPI_MASTER,
         .data_width = 8U,
-        .max_hz = CAMERA_ARDUCAM_SPI_MAX_HZ,
+        .max_hz = ARDUCAM_FIFO_SPI_MAX_HZ,
         .frameMode = RT_SPI_MOTO,
     };
 
-    HAL_PIN_Set(PAD_PA00 + CAMERA_ARDUCAM_SPI_MOSI_PIN,
-                ARDUCAM_FIFO_SPI_DIO_FUNCTION, PIN_NOPULL, 1);
-    HAL_PIN_Set(PAD_PA00 + CAMERA_ARDUCAM_SPI_MISO_PIN,
-                ARDUCAM_FIFO_SPI_DI_FUNCTION, PIN_PULLUP, 1);
-    HAL_PIN_Set(PAD_PA00 + CAMERA_ARDUCAM_SPI_SCLK_PIN,
-                ARDUCAM_FIFO_SPI_CLK_FUNCTION, PIN_NOPULL, 1);
-    HAL_PIN_Set(PAD_PA00 + CAMERA_ARDUCAM_SPI_CS_PIN,
-                ARDUCAM_FIFO_SPI_CS_FUNCTION, PIN_PULLUP, 1);
-
-    if (rt_device_find(CAMERA_ARDUCAM_SPI_DEVICE_NAME) == RT_NULL &&
+    if (rt_device_find(ARDUCAM_FIFO_SPI_DEVICE_NAME) == RT_NULL &&
         rt_hw_spi_device_attach(ARDUCAM_FIFO_SPI_BUS_NAME,
-                                CAMERA_ARDUCAM_SPI_DEVICE_NAME) != RT_EOK)
+                                ARDUCAM_FIFO_SPI_DEVICE_NAME) != RT_EOK)
         return BUS_ERR_HW;
     handle->spi = (struct rt_spi_device *)rt_device_find(
-        CAMERA_ARDUCAM_SPI_DEVICE_NAME);
+        ARDUCAM_FIFO_SPI_DEVICE_NAME);
     if (handle->spi == RT_NULL ||
         rt_device_open((rt_device_t)handle->spi,
                        RT_DEVICE_FLAG_RDWR | RT_DEVICE_FLAG_DMA_RX |
@@ -441,7 +432,7 @@ static int arducam_fifo_init(bus_adapter_t *self)
     }
     handle->initialized = RT_TRUE;
     LOG_I("initialized: %s at %u Hz", ARDUCAM_FIFO_SPI_BUS_NAME,
-          (unsigned int)CAMERA_ARDUCAM_SPI_MAX_HZ);
+          (unsigned int)ARDUCAM_FIFO_SPI_MAX_HZ);
     return BUS_OK;
 
 error:

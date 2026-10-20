@@ -28,15 +28,6 @@
 
 #include "tjpgd.h"
 
-#ifndef LVSF_USING_SJPG
-    #define LVSF_USING_SJPG 0
-#endif
-#ifndef LV_USE_SJPG
-    #define LV_USE_SJPG 0
-#endif
-
-#if LV_USE_SJPG || LVSF_USING_SJPG
-
 #if JD_FASTDECODE == 2
     #define HUFF_BIT    10  /* Bit length to apply fast huffman decode */
     #define HUFF_LEN    (1 << HUFF_BIT)
@@ -1085,7 +1076,7 @@ static JRESULT mcu_output(
 #define LDB_WORD(ptr)       (uint16_t)(((uint16_t)*((uint8_t*)(ptr))<<8)|(uint16_t)*(uint8_t*)((ptr)+1))
 
 
-JRESULT jd_prepare_ex(
+JRESULT camera_fw_jd_prepare_ex(
     JDEC *jd,               /* Blank decompressor object */
     size_t (*infunc)(JDEC *, uint8_t *, size_t), /* JPEG strem input function */
     void *pool,             /* Working buffer for the decompression session */
@@ -1280,7 +1271,7 @@ JRESULT jd_prepare_ex(
 /* Start to decompress the JPEG picture                                  */
 /*-----------------------------------------------------------------------*/
 
-JRESULT jd_decomp(
+JRESULT camera_fw_jd_decomp(
     JDEC *jd,                               /* Initialized decompression object */
     int (*outfunc)(JDEC *, void *, JRECT *), /* RGB output function */
     uint8_t scale                           /* Output de-scaling factor (0 to 3) */
@@ -1321,4 +1312,4 @@ JRESULT jd_decomp(
     return rc;
 }
 
-#endif /*LV_USE_SJPG || LVSF_USING_SJPG*/
+/* End of camera_framework TJpgDec fork (symbols are camera_fw_jd_*). */

@@ -21,33 +21,6 @@ static struct rt_i2c_bus_device *i2c_bus = RT_NULL;
 #define SCCB_MAX_REG_ADDR_LEN 4
 #define SCCB_MAX_TRANSFER_DATA_LEN 32
 
-/** @brief Configure SCCB pinmux for selected I2C bus. */
-static rt_err_t sccb_configure_pins(const char *i2c_bus_name)
-{
-    if (i2c_bus_name == RT_NULL)
-    {
-        LOG_E("SCCB: I2C bus name is null");
-        return -RT_EINVAL;
-    }
-
-    if (strcmp(i2c_bus_name, "i2c1") == 0)
-    {
-        HAL_PIN_Set(SCCB_SCL_PIN, I2C1_SCL, PIN_PULLUP, 1);
-        HAL_PIN_Set(SCCB_SDA_PIN, I2C1_SDA, PIN_PULLUP, 1);
-        return RT_EOK;
-    }
-
-    if (strcmp(i2c_bus_name, "i2c2") == 0)
-    {
-        HAL_PIN_Set(SCCB_SCL_PIN, I2C2_SCL, PIN_PULLUP, 1);
-        HAL_PIN_Set(SCCB_SDA_PIN, I2C2_SDA, PIN_PULLUP, 1);
-        return RT_EOK;
-    }
-
-    LOG_E("SCCB: unsupported I2C bus name %s", i2c_bus_name);
-    return -RT_EINVAL;
-}
-
 /** @brief Init SCCB I2C transport. */
 rt_err_t sccb_init(const sccb_config_t *config)
 {
@@ -59,11 +32,8 @@ rt_err_t sccb_init(const sccb_config_t *config)
         return -RT_EINVAL;
     }
 
-    ret = sccb_configure_pins(config->bus_name);
-    if (ret != RT_EOK)
-    {
-        return ret;
-    }
+    /* The pads belong to the board and are already muxed by bsp_pinmux.c. */
+    LOG_I("SCCB: using %s, pads muxed by the board", config->bus_name);
 
     i2c_bus = rt_i2c_bus_device_find(config->bus_name);
     if (i2c_bus == RT_NULL)

@@ -20,12 +20,24 @@
 #endif
 #include "camera_xclk.h"
 #include "bf0_hal.h"
+#include "drv_io.h"
 #include "rtthread.h"
 
 #define DBG_TAG "ov2640"
 #define DBG_LVL DBG_LOG
 #include <rtdbg.h>
 #include <string.h>
+
+/* Sensor-owned constants: the control-bus speed/timeout and the frame wait are
+ * properties of this sensor, not menu options. The bus itself (and therefore
+ * the I2C device name) belongs to the board. */
+#define OV2640_SCCB_TIMEOUT_MS   1000U
+#define OV2640_SCCB_MAX_HZ       100000U
+#define OV2640_FRAME_TIMEOUT_MS  30000U
+
+/* A bare OV2640 has no oscillator: without the board's MCLK it answers nothing
+ * on SCCB. camera_xclk.c turns that into a build error through
+ * CAMERA_XCLK_REQUIRED / CAMERA_XCLK_ENABLE, so nothing to warn about here. */
 
 static sensor_device_t  *s_active_device = RT_NULL;
 static sensor_device_t  s_device;
@@ -96,9 +108,9 @@ typedef struct {
 
 static const sensor_hw_config_t g_hw_config = {
     .sccb = {
-        .bus_name               = CAMERA_SCCB_I2C_BUS_NAME,
-        .timeout_ms             = CAMERA_SCCB_TIMEOUT_MS,
-        .max_hz                 = CAMERA_SCCB_MAX_HZ,
+        .bus_name               = SCCB_I2C_BUS_NAME,
+        .timeout_ms             = OV2640_SCCB_TIMEOUT_MS,
+        .max_hz                 = OV2640_SCCB_MAX_HZ,
     },
     .runtime = {
         .adapter_name = CAMERA_DATA_BUS_ADAPTER_NAME,
@@ -107,7 +119,7 @@ static const sensor_hw_config_t g_hw_config = {
 #else
         .adapter_type = BUS_TYPE_DVP,
 #endif
-        .frame_timeout_ms = CAMERA_READ_TIMEOUT_MS,
+        .frame_timeout_ms = OV2640_FRAME_TIMEOUT_MS,
         .default_config = &g_default_config,
     },
     .xclk_frequency_hz = 24000000U,
@@ -131,27 +143,6 @@ static int sensor_capture_async(void *buffer,
 static int sensor_start_stream(const camera_stream_start_args_t *args);
 static int sensor_stop_stream(void);
 static rt_bool_t sensor_stream_frame_is_valid(const camera_stream_frame_t *frame);
-
-static int sensor_configure_arducam_sccb_pins(void)
-{
-#if defined(CAMERA_USING_ARDUCAM_FIFO)
-    if (strcmp(CAMERA_SCCB_I2C_BUS_NAME, "i2c1") == 0)
-    {
-        HAL_PIN_Set(PAD_PA00 + CAMERA_SCCB_SCL_PIN, I2C1_SCL, PIN_PULLUP, 1);
-        HAL_PIN_Set(PAD_PA00 + CAMERA_SCCB_SDA_PIN, I2C1_SDA, PIN_PULLUP, 1);
-        return RT_EOK;
-    }
-    if (strcmp(CAMERA_SCCB_I2C_BUS_NAME, "i2c2") == 0)
-    {
-        HAL_PIN_Set(PAD_PA00 + CAMERA_SCCB_SCL_PIN, I2C2_SCL, PIN_PULLUP, 1);
-        HAL_PIN_Set(PAD_PA00 + CAMERA_SCCB_SDA_PIN, I2C2_SDA, PIN_PULLUP, 1);
-        return RT_EOK;
-    }
-    return -RT_EINVAL;
-#else
-    return RT_EOK;
-#endif
-}
 
 const camera_device_ops_t ov2640_ops = {
     .capabilities   = &g_camera_caps,
@@ -826,29 +817,18 @@ static int sensor_open(void)
     cam_dev->current_bank = (rt_uint8_t)BANK_MAX;
     s_active_device = cam_dev;
 
-    if (CAMERA_XCLK_PIN >= 0 &&
-        camera_xclk_start(CAMERA_XCLK_PIN,
-                          g_hw_config.xclk_frequency_hz) != CAMERA_XCLK_OK)
+    if (camera_xclk_start(g_hw_config.xclk_frequency_hz) != CAMERA_XCLK_OK)
     {
         LOG_E("XCLK start failed");
         s_active_device = RT_NULL;
         return -RT_ERROR;
     }
 
-    ret = sensor_configure_arducam_sccb_pins();
-    if (ret != RT_EOK)
-    {
-        LOG_E("unsupported SCCB bus: %s", CAMERA_SCCB_I2C_BUS_NAME);
-        camera_xclk_stop(CAMERA_XCLK_PIN);
-        s_active_device = RT_NULL;
-        return ret;
-    }
-
     ret = sccb_init(&g_hw_config.sccb);
     if (ret != RT_EOK)
     {
         LOG_E("SCCB init failed: %d", ret);
-        camera_xclk_stop(CAMERA_XCLK_PIN);
+        camera_xclk_stop();
         s_active_device = RT_NULL;
         return ret;
     }
@@ -863,7 +843,7 @@ static int sensor_open(void)
     {
         LOG_E("Camera runtime init failed: %d", ret);
         sccb_deinit();
-        camera_xclk_stop(CAMERA_XCLK_PIN);
+        camera_xclk_stop();
         s_active_device = RT_NULL;
         return ret;
     }
@@ -883,7 +863,7 @@ static int sensor_open(void)
                   ver);
             camera_sensor_runtime_close(&cam_dev->runtime);
             sccb_deinit();
-            camera_xclk_stop(CAMERA_XCLK_PIN);
+            camera_xclk_stop();
             s_active_device = RT_NULL;
             return -RT_EIO;
         }
@@ -896,7 +876,7 @@ static int sensor_open(void)
         LOG_E("OV2640 init failed: %d", ret);
         camera_sensor_runtime_close(&cam_dev->runtime);
         sccb_deinit();
-        camera_xclk_stop(CAMERA_XCLK_PIN);
+        camera_xclk_stop();
         s_active_device = RT_NULL;
         return ret;
     }
@@ -926,7 +906,7 @@ static int sensor_close(void)
         return ret;
     }
     sccb_deinit();
-    camera_xclk_stop(CAMERA_XCLK_PIN);
+    camera_xclk_stop();
     sensor_reset_bank_state();
     s_active_device = RT_NULL;
 

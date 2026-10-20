@@ -1,425 +1,143 @@
-menuconfig CAMERA_FRAMEWORK_ENABLE
+menuconfig PKG_USING_CAMERA_FRAMEWORK
     bool "Camera drivers"
-    default y
+    default n
     select RT_USING_SYSTEM_WORKQUEUE
     help
-      Enable the camera framework, including the handle layer, sensor driver
-      selection, control-bus settings, and data-bus backend settings.
-
-if CAMERA_FRAMEWORK_ENABLE
-
-    menu "Sensor settings"
-
-        choice
-            prompt "Active camera sensor"
-            default SENSOR_USING_OV2640
-            help
-              Select the sensor driver that the camera handle layer binds to
-              at compile time. New sensor drivers should add one option here.
-
-            config SENSOR_USING_OV2640
-                bool "Use OV2640"
-                help
-                  Enable this option to use OV2640 as the active camera driver.
-
-            config SENSOR_USING_GC032A
-                bool "Use GC032A"
-                help
-                  Enable this option to use GC032A as the active camera driver.
-
-            config SENSOR_USING_BF30A2
-                bool "Use BF30A2"
-                select BSP_USING_SPI
-                select BSP_USING_SPI2
-                select BSP_SPI2_RX_USING_DMA
-                select BSP_USING_SPI_DMA_CIRCULAR
-                help
-                  Enable this option to use BF30A2 as the active camera driver.
-        endchoice
-
-        choice
-            prompt "OV2640 data interface"
-            depends on SENSOR_USING_OV2640
-            default CAMERA_OV2640_INTERFACE_DVP
-            help
-              Select whether OV2640 pixels arrive through the parallel DVP
-              bus or through an Arducam module's SPI FIFO.
-
-            config CAMERA_OV2640_INTERFACE_DVP
-                bool "8-bit DVP"
-
-            config CAMERA_OV2640_INTERFACE_ARDUCAM_FIFO
-                bool "Arducam SPI FIFO"
-        endchoice
-
-        choice
-            prompt "GC032A output interface"
-            depends on SENSOR_USING_GC032A
-            default CAMERA_GC032A_INTERFACE_DVP_8BIT
-            help
-              Select the physical image-data interface used by GC032A.
-
-            config CAMERA_GC032A_INTERFACE_DVP_8BIT
-                bool "8-bit DVP"
-
-            config CAMERA_GC032A_INTERFACE_SERIAL_2BIT
-                bool "2-bit SPI"
-        endchoice
-
-        config CAMERA_READ_TIMEOUT_MS
-            int "Frame wait timeout (ms)"
-            default 1000
-            range 100 60000
-            help
-              Timeout value in milliseconds for blocking frame wait in
-              single-shot capture.
-
-    endmenu
-
-    menu "SCCB settings"
-
-        config CAMERA_SCCB_I2C_BUS_NAME
-            string "I2C bus name"
-            default "i2c1"
-            help
-              RT-Thread I2C bus device name used by the camera SCCB control bus.
-
-        config CAMERA_SCCB_TIMEOUT_MS
-            int "Timeout (ms)"
-            default 1000
-            help
-              Timeout value in milliseconds for SCCB I2C transactions.
-
-        config CAMERA_SCCB_MAX_HZ
-            int "Max frequency (Hz)"
-            default 100000
-            range 10000 400000
-            help
-              Maximum I2C clock frequency used by the camera SCCB control bus.
-
-        config CAMERA_SCCB_SCL_PIN
-            int "SCCB SCL pin (PAx index)"
-            default 27 if CAMERA_OV2640_INTERFACE_ARDUCAM_FIFO
-            default 30 if CAMERA_GC032A_INTERFACE_SERIAL_2BIT
-            default 30 if SENSOR_USING_BF30A2
-            default 76 if SOC_SF32LB56X
-            default 40
-            range 0 95
-            help
-              PAx pin used for the SCCB clock signal. GC032A 2-bit SPI
-              examples use PA30 to avoid the PA37-PA39 image-data pins.
-
-        config CAMERA_SCCB_SDA_PIN
-            int "SCCB SDA pin (PAx index)"
-            default 20 if CAMERA_OV2640_INTERFACE_ARDUCAM_FIFO
-            default 33 if CAMERA_GC032A_INTERFACE_SERIAL_2BIT
-            default 33 if SENSOR_USING_BF30A2
-            default 72 if SOC_SF32LB56X
-            default 39
-            range 0 95
-            help
-              PAx pin used for the SCCB data signal. GC032A 2-bit SPI
-              examples use PA33 to avoid the PA37-PA39 image-data pins.
-
-    endmenu
-
-    menu "Data bus settings"
-
-        config CAMERA_USING_DVP
-            bool
-            default y if CAMERA_OV2640_INTERFACE_DVP
-            default y if CAMERA_GC032A_INTERFACE_DVP_8BIT
-
-        config CAMERA_USING_SERIAL
-            bool
-            default y if CAMERA_GC032A_INTERFACE_SERIAL_2BIT
-
-        config CAMERA_USING_ARDUCAM_FIFO
-            bool
-            default y if CAMERA_OV2640_INTERFACE_ARDUCAM_FIFO
-
-        config CAMERA_DATA_BUS_ADAPTER_NAME
-            string
-            default "dcmi" if CAMERA_SERIAL_SPI_2BIT
-            default "dvp" if CAMERA_USING_DVP
-            default "camera_serial" if CAMERA_USING_SERIAL
-            default "arducam_fifo" if CAMERA_USING_ARDUCAM_FIFO
-            help
-              Internal helper symbol that resolves to the selected data bus
-              adapter name for the active sensor interface. 2-bit SPI data is
-              carried by the DCMI SPI packet mode on 57x and by the GPIO-DMA
-              adapter on 52x/56x.
-
-        if CAMERA_USING_DVP
-
-        choice
-            prompt "DVP capture backend"
-            default CAMERA_DVP_BACKEND_DCMI if SOC_SF32LB57X
-            default CAMERA_DVP_BACKEND_GPIO
-
-            config CAMERA_DVP_BACKEND_GPIO
-                bool "GPIO and timer DMA"
-                depends on SOC_SF32LB52X || SOC_SF32LB56X
-                select BSP_USING_GPTIM1
-
-            config CAMERA_DVP_BACKEND_DCMI
-                bool "Hardware DCMI (HAL)"
-                depends on SOC_SF32LB57X && !BSP_USING_DCMI
-                help
-                  Receive parallel DVP pixels through the SDK DCMI and DMA HAL.
-                  The framework owns capture, interrupts and JPEG frame completion.
-                  The board configures D0-D7, PCLK, HREF and VSYNC pinmux in
-                  HAL_DCMI_MspInit(). Keep the SDK DCMI device driver disabled.
-                  Raw streaming uses continuous capture and circular DMA.
-                  Supply two contiguous 64-byte-aligned buffers, each exactly
-                  one image payload in size. DMA half/full events hand off buffers.
-                  Validate borrowed frames before and after copying them.
-        endchoice
-
-        config CAMERA_DCMI_PCLK_FALLING
-            bool "DCMI capture on falling PCLK edge"
-            depends on CAMERA_DVP_BACKEND_DCMI
-            default n
-            help
-              Sample DVP data on the falling pixel-clock edge. By default,
-              capture uses the rising edge.
-
-        if CAMERA_DVP_BACKEND_GPIO
-
-        config CAMERA_DVP_PINGPONG_POOL_SIZE
-            int "Ping-pong pool size (compile-time ceiling)"
-            default 10240
-            range 1024 65536
-            help
-              Size of the statically allocated ping-pong buffer pool owned by
-              the DVP backend. This is the hard upper limit for runtime
-              ping-pong resizing.
-
-        config CAMERA_DVP_PINGPONG_BUFFER_SIZE
-            int "Initial ping-pong size"
-            default 8192
-            range 1024 CAMERA_DVP_PINGPONG_POOL_SIZE
-            help
-              Initial active ping-pong DMA size passed to the DVP bus.
-              Must not exceed CAMERA_DVP_PINGPONG_POOL_SIZE.
-
-        config CAMERA_DVP_PINGPONG_USE_SECTION
-            bool "Place ping-pong pool in .dvp_pingpong section"
-            default n
-            help
-              When enabled, the DVP backend ping-pong buffer pool is
-              placed in the ".dvp_pingpong" linker section.
-
-        config CAMERA_DVP_DATA_PIN_BASE
-            int "DVP data pin base number"
-            default 0
-            help
-              Internal helper option for DVP data pin base numbering.
-              Do not modify unless you are adjusting the low-level platform port.
-
-        config CAMERA_DVP_PCLK_PIN
-            int "PCLK pin number (PAx index)"
-            default 41
-            help
-              PAx pin index for the DVP pixel clock (PCLK) input.
-              The driver muxes this pin to GPTIM1_ETR automatically.
-
-        config CAMERA_DVP_HSYNC_PIN
-            int "HSYNC pin number (PAx index)"
-            default 43
-            help
-              PAx pin index for the DVP horizontal sync (HSYNC/HREF) input.
-              The driver muxes this pin to GPTIM1_CH1 automatically.
-
-        config CAMERA_DVP_VSYNC_PIN
-            int "VSYNC pin number (PAx index)"
-            default 42
-            help
-              PAx pin index for the DVP VSYNC GPIO interrupt input.
-
-        endif
-
-        endif # CAMERA_USING_DVP
-
-        if CAMERA_USING_SERIAL
-
-        choice
-            prompt "2-bit capture mode"
-            default CAMERA_SERIAL_SPI_2BIT if SOC_SF32LB57X
-            default CAMERA_SERIAL_GPIO_SAMPLING
-            help
-              How the two data lines are captured. Both modes deliver
-              the same RGB565 frames; they only differ in which hardware
-              samples the wire.
-
-            config CAMERA_SERIAL_GPIO_SAMPLING
-                bool "GPIO sampling and timer DMA"
-                depends on SOC_SF32LB52X || SOC_SF32LB56X
-                select BSP_USING_GPTIM1
-                help
-              Sample the two data lines with a timer-triggered DMA and decode
-              the packet markers in software. Supported on 52x/56x, where the
-              serial pads are plain GPIOs.
-
-            config CAMERA_SERIAL_SPI_2BIT
-                bool "DCMI SPI 2-bit packet mode"
-                depends on SOC_SF32LB57X && !BSP_USING_DCMI
-                help
-              Receive the two data lines through the SDK DCMI in its SPI
-              packet mode: the peripheral locks on the packet identifiers,
-              strips the markers and packs the payload into the DMA buffer.
-              The clock and data pads are muxed by the board code in
-              HAL_DCMI_MspInit(). Keep the SDK DCMI device driver disabled.
-              Raw streaming uses continuous capture and circular DMA.
-        endchoice
-
-        if CAMERA_SERIAL_SPI_2BIT
-
-        config CAMERA_SERIAL_SPI_PACKET_SIZE
-            int "Packet size (bytes per line)"
-            default 1280
-            range 1 65535
-            help
-              Bytes of payload the sensor sends for one image line. The DCMI
-              uses it to tell a complete packet from a truncated one. A line
-              of 640 RGB565 pixels is 1280 bytes.
-
-        config CAMERA_SERIAL_SPI_PACKET_IDS
-            hex "Packet identifiers"
-            default 0x9d80b6ca
-            help
-              Marker bytes that frame the packets, packed low to high as
-              frame start, frame end, line start and line end. GC032A sends
-              frame start 0xca, frame end 0xb6, line start 0x80 and line end
-              0x9d.
-
-        config CAMERA_SERIAL_SPI_SYNC_WORD
-            hex "Sync word"
-            default 0x00ffffff
-            help
-              24-bit pattern the DCMI looks for while it hunts for the first
-              packet boundary. The all-ones default is what GC032A needs.
-
-        config CAMERA_SERIAL_SPI_SAMPLE_FALLING
-            bool "Sample on the falling clock edge"
-            default y
-            help
-              Capture the serial data on the falling serial clock edge, as
-              GC032A needs. Disable it to sample on the rising edge.
-
-        config CAMERA_SERIAL_SPI_DI_SWAP
-            bool "Swap the two data lines"
-            default n
-            help
-              Treat DI1 as the first serial data line and DI0 as the second.
-              Enable it when the two wires reach the SoC in the opposite order
-              instead of rewiring the flex.
-
-        endif # CAMERA_SERIAL_SPI_2BIT
-
-        config CAMERA_SERIAL_SAMPLE_BUFFER_SIZE
-            int "Serial GPIO DMA sample buffer size"
-            default 32768
-            range 1024 65528
-            help
-              Number of GPIO samples stored by the circular DMA buffer of the
-              GPIO sampling and timer DMA mode. The value must be a multiple
-              of 8 and no greater than 65535. Unused by the DCMI SPI 2-bit
-              packet mode.
-
-        config CAMERA_SERIAL_WORKER_STACK_SIZE
-            int
-            default 2048
-
-        endif # CAMERA_USING_SERIAL
-
-        if CAMERA_USING_ARDUCAM_FIFO
-
-        choice
-            prompt "Arducam FIFO SPI bus"
-            default CAMERA_ARDUCAM_SPI_BUS2
-
-            config CAMERA_ARDUCAM_SPI_BUS1
-                bool "SPI1"
-                select BSP_USING_SPI
-                select BSP_USING_SPI1
-                select BSP_SPI1_RX_USING_DMA
-                select BSP_SPI1_TX_USING_DMA
-
-            config CAMERA_ARDUCAM_SPI_BUS2
-                bool "SPI2"
-                select BSP_USING_SPI
-                select BSP_USING_SPI2
-                select BSP_SPI2_RX_USING_DMA
-                select BSP_SPI2_TX_USING_DMA
-        endchoice
-
-        config CAMERA_ARDUCAM_SPI_DEVICE_NAME
-            string "SPI device name"
-            default "arducam"
-            help
-              RT-Thread SPI device name reserved for the Arducam FIFO module.
-
-        config CAMERA_ARDUCAM_SPI_MAX_HZ
-            int "SPI clock frequency (Hz)"
-            default 8000000
-            range 1000000 24000000
-
-        config CAMERA_ARDUCAM_SPI_MOSI_PIN
-            int "SPI MOSI pin (PAx index)"
-            default 24 if CAMERA_ARDUCAM_SPI_BUS1
-            default 37 if CAMERA_ARDUCAM_SPI_BUS2
-            range 0 95
-
-        config CAMERA_ARDUCAM_SPI_MISO_PIN
-            int "SPI MISO pin (PAx index)"
-            default 25 if CAMERA_ARDUCAM_SPI_BUS1
-            default 38 if CAMERA_ARDUCAM_SPI_BUS2
-            range 0 95
-
-        config CAMERA_ARDUCAM_SPI_SCLK_PIN
-            int "SPI SCLK pin (PAx index)"
-            default 28 if CAMERA_ARDUCAM_SPI_BUS1
-            default 39 if CAMERA_ARDUCAM_SPI_BUS2
-            range 0 95
-
-        config CAMERA_ARDUCAM_SPI_CS_PIN
-            int "SPI CS pin (PAx index)"
-            default 29 if CAMERA_ARDUCAM_SPI_BUS1
-            default 40 if CAMERA_ARDUCAM_SPI_BUS2
-            range 0 95
-
-        config CAMERA_ARDUCAM_FIFO_SCRATCH_SIZE
-            int "FIFO transfer scratch size"
-            default 8192
-            range 1024 65536
-
-        config CAMERA_ARDUCAM_FIFO_WORKER_STACK_SIZE
-            int "FIFO worker stack size"
-            default 2048
-            range 1024 4096
-
-        endif
-
-        config CAMERA_XCLK_PIN
-            int "Sensor XCLK output pin (PAx index)"
-            default 9 if CAMERA_GC032A_INTERFACE_SERIAL_2BIT
-            default 9 if SENSOR_USING_BF30A2
-            default -1
-            help
-              PAx pin index for XCLK output. Set to -1 to use an external
-              sensor clock source.
-
-    menu "BF30A2 settings"
-        depends on SENSOR_USING_BF30A2
-
-        config CAMERA_BF30A2_DMA_BUFFER_SIZE
-            int "BF30A2 SPI DMA circular buffer size"
-            default 8192
-            range 1024 65534
-    endmenu
-
-    endmenu
+      Enable the camera framework package, including the handle layer, the
+      sensor drivers and the data-bus backends.
+
+      The SDK only exposes CAMERA_MODEL / CAMERA_INTERFACE strings. This
+      package owns the mapping from those strings to drivers, SPI bus names,
+      backends and internal symbols.
+
+if PKG_USING_CAMERA_FRAMEWORK
+
+    # ---- model name -> driver selector ---------------------------------
+    config SENSOR_USING_OV2640
+        bool
+        default y if CAMERA_MODEL = "ov2640"
+
+    config SENSOR_USING_GC032A
+        bool
+        default y if CAMERA_MODEL = "gc032a"
+
+    config SENSOR_USING_BF30A2
+        bool
+        default y if CAMERA_MODEL = "bf30a2"
+
+    # ---- model + interface -> backend selector -------------------------
+    # Interface names are not free-standing: each one is only valid for the
+    # models that really support that wiring. This prevents combinations like
+    # GC032A + spi1 or OV2640 + serial2bit from generating a half-configured
+    # backend.
+    config CAMERA_USING_DVP
+        bool
+        depends on SOC_SF32LB57X
+        default y if CAMERA_MODEL = "ov2640" && CAMERA_INTERFACE = "dvp"
+        default y if CAMERA_MODEL = "gc032a" && CAMERA_INTERFACE = "dvp"
+
+    config CAMERA_USING_SERIAL
+        bool
+        depends on SOC_SF32LB57X
+        default y if CAMERA_MODEL = "gc032a" && CAMERA_INTERFACE = "serial2bit"
+
+    config CAMERA_USING_SPI_MODULE
+        bool
+        default y if CAMERA_MODEL = "ov2640" && CAMERA_INTERFACE = "spi1"
+        default y if CAMERA_MODEL = "ov2640" && CAMERA_INTERFACE = "spi2"
+        default y if CAMERA_MODEL = "bf30a2" && CAMERA_INTERFACE = "spi1"
+        default y if CAMERA_MODEL = "bf30a2" && CAMERA_INTERFACE = "spi2"
+
+    # OV2640 has no serial pixel output; its SPI path is always an ArduCam
+    # FIFO module. BF30A2 streams directly over SPI, so it is not included.
+    config CAMERA_USING_ARDUCAM_FIFO
+        bool
+        default y if CAMERA_MODEL = "ov2640" && CAMERA_INTERFACE = "spi1"
+        default y if CAMERA_MODEL = "ov2640" && CAMERA_INTERFACE = "spi2"
+
+    # Existing GC032A driver code uses this model+interface selector.
+    config CAMERA_GC032A_INTERFACE_SERIAL_2BIT
+        bool
+        depends on SOC_SF32LB57X
+        default y if CAMERA_MODEL = "gc032a" && CAMERA_INTERFACE = "serial2bit"
+
+    # ---- interface string -> SPI instance ------------------------------
+    config CAMERA_SPI_BUS
+        string
+        depends on CAMERA_USING_SPI_MODULE
+        default "spi1" if CAMERA_INTERFACE = "spi1"
+        default "spi2" if CAMERA_INTERFACE = "spi2"
+
+    # ---- backend -> SDK peripheral ------------------------------------
+    config CAMERA_DVP_BACKEND_DCMI
+        bool
+        depends on SOC_SF32LB57X
+        default y if CAMERA_USING_DVP
+        select BSP_USING_DCMI
+
+    config CAMERA_SERIAL_SPI_2BIT
+        bool
+        depends on SOC_SF32LB57X
+        default y if CAMERA_USING_SERIAL
+        select BSP_USING_DCMI
+
+    # ---- SPI instance -> driver/DMA -----------------------------------
+    config CAMERA_SPI_MODULE_SPI1
+        bool
+        default y if CAMERA_USING_SPI_MODULE && CAMERA_SPI_BUS = "spi1"
+        select BSP_USING_SPI
+        select BSP_USING_SPI1
+        select BSP_SPI1_RX_USING_DMA
+        select BSP_SPI1_TX_USING_DMA
+
+    config CAMERA_SPI_MODULE_SPI2
+        bool
+        default y if CAMERA_USING_SPI_MODULE && CAMERA_SPI_BUS = "spi2"
+        select BSP_USING_SPI
+        select BSP_USING_SPI2
+        select BSP_SPI2_RX_USING_DMA
+        select BSP_SPI2_TX_USING_DMA
+
+    # BF30A2 needs circular DMA; the ArduCam FIFO path does not.
+    config CAMERA_BF30A2_SPI_DMA_CIRCULAR
+        bool
+        default y if SENSOR_USING_BF30A2 && CAMERA_USING_SPI_MODULE
+        select BSP_USING_SPI_DMA_CIRCULAR
+
+    # ---- SPI device names used by the drivers --------------------------
+    config CAMERA_ARDUCAM_SPI_BUS_NAME
+        string
+        default CAMERA_SPI_BUS if CAMERA_USING_ARDUCAM_FIFO
+
+    config CAMERA_BF30A2_SPI_BUS_NAME
+        string
+        default CAMERA_SPI_BUS if SENSOR_USING_BF30A2 && CAMERA_USING_SPI_MODULE
+
+    # ---- runtime adapter name -----------------------------------------
+    config CAMERA_DATA_BUS_ADAPTER_NAME
+        string
+        default "dcmi" if CAMERA_SERIAL_SPI_2BIT
+        default "dvp" if CAMERA_USING_DVP
+        default "arducam_fifo" if CAMERA_USING_ARDUCAM_FIFO
+
+    # ---- derived MCLK requirement --------------------------------------
+    # The board owns CAMERA_XCLK_ENABLE and the PWM device/channel macros
+    # directly in its Kconfig.board. The component only derives whether the
+    # selected sensor needs a clock.
+    config CAMERA_XCLK_REQUIRED
+        bool
+        default y if SENSOR_USING_OV2640 && !CAMERA_USING_ARDUCAM_FIFO
+        default y if SENSOR_USING_GC032A
+        default y if SENSOR_USING_BF30A2
+
+    # Any supported model/interface combination selects one of the backend
+    # symbols above. SConscript uses this to reject unsupported pairs instead
+    # of silently building a framework with no backend.
+    config CAMERA_CONFIG_VALID
+        bool
+        default y if CAMERA_USING_DVP
+        default y if CAMERA_USING_SERIAL
+        default y if CAMERA_USING_SPI_MODULE
 
     rsource "software/Kconfig"
 

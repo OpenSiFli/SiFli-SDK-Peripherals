@@ -1,4 +1,4 @@
-﻿# take_photo 示例
+# take_photo 示例
 
 [English](README_EN.md)
 
@@ -65,5 +65,5 @@ Export the buffer with the SDK script, e.g.:
 
 ## 备注
 
-- 引脚复用（SCCB / DVP 或 serial / XCLK）由 camera framework 内部完成，应用层不需要调用 `HAL_PIN_Set()`
+- 引脚复用（SCCB / SPI / 传感器 RESET / XCLK）一律由开发板自己的 `bsp_pinmux.c` 负责，camera framework 不调用 `HAL_PIN_Set()`、也不提供引脚项；应用层同样不需要自己复用引脚
 - 该示例适合验证 RGB565 单帧采集链路是否正常

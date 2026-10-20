@@ -18,8 +18,9 @@ msh> take_photo_async <framesize> <quality>
 ## 选择摄像头
 
 在 menuconfig 的 `Camera drivers -> Sensor settings -> Active camera sensor`
-中选择摄像头；选择 GC032A 后还可以选择 `8-bit DVP` 或
-`2-bit SPI`，构建系统只会编译选中的 sensor 和 data backend。
+中选择摄像头；选择 GC032A 后还可以选择 `8-bit DVP`（仅 SF32LB57X，
+52x/56x 上没有并行 DVP 采集路径）或 `2-bit SPI`，构建系统只会编译选中的
+sensor 和 data backend。
 BF30A2 使用固定的 RGB565/240×320 模式。
 
 - `take_photo` 会查询当前摄像头能力：支持 JPEG 时保存 `.jpg`，否则使用
@@ -28,23 +29,9 @@ BF30A2 使用固定的 RGB565/240×320 模式。
 
 ## GC032A 2-bit SPI 接线
 
-仓库中的 GC032A 串行例程统一使用 GPTIM1 外部时钟触发 GPIO-DMA，因此
-`handle` 测试和本例程可以共用同一套接线；SPI1 保留给开发板上的 TF 卡。
-
-| GC032A 模块引脚 | SF32LB52 开发板 | 说明 |
-| --- | --- | --- |
-| GND（1、10） | GND | 共地 |
-| 3V3（2） | 3V3 | 电源 |
-| IIC_SDA（3） | PA33 | SCCB / I2C1 SDA |
-| IIC_SCL（4） | PA30 | SCCB / I2C1 SCL |
-| PWDN（5） | GND | 低电平保持工作 |
-| MCLK（6） | PA9 | 6 MHz XCLK |
-| SPI_CLK（7） | PA39 | GPTIM1 ETR 采样时钟 |
-| SPI_D1（8） | PA38 | GPIO-DMA 数据位 1 |
-| SPI_D0（9） | PA37 | GPIO-DMA 数据位 0 |
-
-PA37、PA38 会在 PA39 的每个采样沿被同时读取，不使用 SPI2，也不需要连接
-CS。
+52x/56x 上用于 2-bit 串行的 GPIO 采样（GPIO-DMA）后端已整体删除。2-bit 串行采集
+只剩 57x 的 DCMI SPI 包模式，其时钟/数据 pad 由开发板 `bsp_pinmux.c` 复用，本例程
+不自己复用任何引脚。
 
 参数：
 
@@ -104,6 +91,6 @@ GC032A 或 BF30A2 的 RGB565 输出类似：
 
 ## 备注
 
-- 引脚复用（SCCB / DVP 或 2-bit SPI / XCLK）由 camera framework 内部完成
+- 引脚复用（SCCB / SPI / XCLK）一律由开发板 `bsp_pinmux.c` 完成，camera framework 不调用 `HAL_PIN_Set()`，也不提供引脚项
 - `camera_change_settings()` 内部已经处理必要的 AEC/AWB 稳定等待
 - 如果看到 `sd card not found` 或挂载失败，请优先检查 `sd0` 设备、文件系统格式和板级连线

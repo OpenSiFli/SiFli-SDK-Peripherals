@@ -1,4 +1,4 @@
-﻿# take_photo Example
+# take_photo Example
 
 [中文](README.md)
 
@@ -66,5 +66,5 @@ The command prints the frame-buffer address and byte count. You can then use SDK
 
 ## Notes
 
-- SCCB / DVP or serial / XCLK pin muxing is handled inside the camera framework; the application does not call `HAL_PIN_Set()`
+- SCCB / SPI / sensor RESET / XCLK pin muxing is owned by the board's `bsp_pinmux.c`; the camera framework never calls `HAL_PIN_Set()` and carries no pin option, and the application does not mux pads either
 - this example is mainly intended to validate the RGB565 single-shot capture path

@@ -16,17 +16,36 @@
 #include "drv_spi.h"
 #include "rtdevice.h"
 #include "rthw.h"
+#include "sccb.h"
 #include <string.h>
 
 #define DBG_TAG "bf30a2"
 #define DBG_LVL DBG_LOG
 #include <rtdbg.h>
 
-#define BF30A2_SPI_BUS_NAME       "spi2"
+/* The SPI pads and the reset pad are board facts: bsp_pinmux.c muxes them, and
+ * the board names the pin this driver toggles (CAMERA_BF30A2_RESET_PIN). Which
+ * SPI instance the module streams on is picked in the Data bus menu
+ * (CAMERA_BF30A2_SPI_BUS1/2 -> CAMERA_BF30A2_SPI_BUS_NAME); the device label,
+ * DMA sizing and frame wait are driver constants. */
+#if !defined(CAMERA_BF30A2_SPI_BUS_NAME)
+#error "the BF30A2 SPI bus choice is missing (CAMERA_BF30A2_SPI_BUS_NAME)"
+#endif
+#if !defined(CAMERA_BF30A2_RESET_PIN)
+#error "board must name the BF30A2 reset pin"
+#endif
+
+#define BF30A2_SPI_BUS_NAME       CAMERA_BF30A2_SPI_BUS_NAME
 #define BF30A2_SPI_DEVICE_NAME    "bf30a2"
+#define BF30A2_RESET_PIN          CAMERA_BF30A2_RESET_PIN
+#define BF30A2_PIN_DEVICE_NAME    "pin"
+#define BF30A2_DMA_BUFFER_SIZE    8192U
 #define BF30A2_LINE_BYTES         (BF30A2_WIDTH * 2U)
 #define BF30A2_CAPTURE_EVENT      0x01U
-#define BF30A2_FRAME_TIMEOUT_MS   CAMERA_READ_TIMEOUT_MS
+#define BF30A2_FRAME_TIMEOUT_MS   1000U
+
+/* BF30A2 has no oscillator: the missing-MCLK case is a build error raised by
+ * camera_xclk.c (CAMERA_XCLK_REQUIRED / CAMERA_XCLK_ENABLE). */
 
 typedef enum
 {
@@ -425,11 +444,28 @@ static void capture_thread(void *arg)
                       50,
                       &event);
         pos = dma_position(dev);
+        if (last_pos != pos)
+        {
+            /* The circular DMA rewrites this ring in place, so the span that
+             * arrived since the previous pass has to leave the cache before it
+             * is parsed. One range per pass: invalidating per byte degenerates
+             * into a whole 32-byte line plus a DSB/ISB for every byte. */
+            if (pos > last_pos)
+            {
+                mpu_dcache_invalidate(dev->dma_buf + last_pos, pos - last_pos);
+            }
+            else
+            {
+                mpu_dcache_invalidate(dev->dma_buf + last_pos,
+                                      dev->dma_size - last_pos);
+                if (pos != 0U)
+                {
+                    mpu_dcache_invalidate(dev->dma_buf, pos);
+                }
+            }
+        }
         while (last_pos != pos && !dev->stop_request)
         {
-#ifdef PSRAM_CACHE_WB
-            mpu_dcache_invalidate(dev->dma_buf + last_pos, 1);
-#endif
             parse_byte(dev, dev->dma_buf[last_pos]);
             last_pos++;
             if (last_pos >= dev->dma_size)
@@ -550,20 +586,13 @@ static int sensor_load_regs(void)
 
 static int xclk_start(void)
 {
-    if (CAMERA_XCLK_PIN < 0)
-    {
-        return RT_EOK;
-    }
-    return camera_xclk_start(CAMERA_XCLK_PIN, g_hw_config.xclk_frequency_hz) ==
-           CAMERA_XCLK_OK ? RT_EOK : -RT_ERROR;
+    return camera_xclk_start(g_hw_config.xclk_frequency_hz) == CAMERA_XCLK_OK ?
+           RT_EOK : -RT_ERROR;
 }
 
 static void xclk_stop(void)
 {
-    if (CAMERA_XCLK_PIN >= 0)
-    {
-        camera_xclk_stop(CAMERA_XCLK_PIN);
-    }
+    camera_xclk_stop();
 }
 
 static int power_on(void)
@@ -571,17 +600,16 @@ static int power_on(void)
     struct rt_device_pin_mode mode;
     struct rt_device_pin_status status;
 
-    HAL_PIN_Set(PAD_PA43, GPIO_A0 + 43, PIN_NOPULL, 1);
-    s_device.gpio_dev = rt_device_find("pin");
+    s_device.gpio_dev = rt_device_find(BF30A2_PIN_DEVICE_NAME);
     if (s_device.gpio_dev == RT_NULL)
     {
         return -RT_ERROR;
     }
     rt_device_open(s_device.gpio_dev, RT_DEVICE_OFLAG_RDWR);
-    mode.pin = 43;
+    mode.pin = BF30A2_RESET_PIN;
     mode.mode = PIN_MODE_OUTPUT;
     rt_device_control(s_device.gpio_dev, 0, &mode);
-    status.pin = 43;
+    status.pin = BF30A2_RESET_PIN;
     status.status = 1;
     rt_device_write(s_device.gpio_dev, 0, &status, sizeof(status));
     rt_thread_mdelay(1);
@@ -601,17 +629,8 @@ static int i2c_init(void)
         .max_hz = 100000,
     };
 
-    if (strcmp(CAMERA_SCCB_I2C_BUS_NAME, "i2c1") == 0)
-    {
-        HAL_PIN_Set(PAD_PA00 + CAMERA_SCCB_SCL_PIN, I2C1_SCL, PIN_PULLUP, 1);
-        HAL_PIN_Set(PAD_PA00 + CAMERA_SCCB_SDA_PIN, I2C1_SDA, PIN_PULLUP, 1);
-    }
-    else
-    {
-        HAL_PIN_Set(PAD_PA00 + CAMERA_SCCB_SCL_PIN, I2C2_SCL, PIN_PULLUP, 1);
-        HAL_PIN_Set(PAD_PA00 + CAMERA_SCCB_SDA_PIN, I2C2_SDA, PIN_PULLUP, 1);
-    }
-    s_device.i2c_bus = rt_i2c_bus_device_find(CAMERA_SCCB_I2C_BUS_NAME);
+    /* The camera I2C pads belong to the board and are muxed by bsp_pinmux.c. */
+    s_device.i2c_bus = rt_i2c_bus_device_find(SCCB_I2C_BUS_NAME);
     if (s_device.i2c_bus == RT_NULL)
     {
         return -RT_ERROR;
@@ -632,9 +651,7 @@ static int spi_init(void)
     struct sifli_spi *driver;
     rt_err_t ret;
 
-    HAL_PIN_Set(PAD_PA39, SPI2_CLK, PIN_PULLUP, 1);
-    HAL_PIN_Set(PAD_PA37, SPI2_DIO, PIN_PULLUP, 1);
-    HAL_PIN_Set(PAD_PA40, SPI2_CS, PIN_PULLDOWN, 1);
+    /* The SPI pads are muxed by the board's bsp_pinmux.c. */
     if (rt_device_find(BF30A2_SPI_DEVICE_NAME) == RT_NULL)
     {
         ret = rt_hw_spi_device_attach(BF30A2_SPI_BUS_NAME,
@@ -695,7 +712,7 @@ static int allocate_runtime(void)
     {
         return RT_EOK;
     }
-    s_device.dma_size = CAMERA_BF30A2_DMA_BUFFER_SIZE;
+    s_device.dma_size = BF30A2_DMA_BUFFER_SIZE;
     if (s_device.dma_size < 1024U || (s_device.dma_size & 1U) != 0U)
     {
         return -RT_EINVAL;
