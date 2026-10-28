@@ -12,7 +12,19 @@
 
 #include <string.h>
 
-#include "tjpgd.h"
+/*
+ * Relative include: this wrapper must always compile against the vendored
+ * tjpgdcnf.h (RGB565 / 2048 / FASTDECODE 1). A bare "tjpgd.h" would resolve to
+ * LVGL v8's sjpg copy whenever that include directory comes first, giving this
+ * translation unit a different JDEC layout than the implementation it links.
+ */
+#include "../../vendor/tjpgd/tjpgd.h"
+
+/* The public header promises RGB565_BE output; enforce the matching core
+ * configuration at build time instead of failing at runtime. */
+#if JD_FORMAT != 1
+#error "camera_sw_jpeg_decoder requires JD_FORMAT 1 (RGB565)"
+#endif
 
 typedef struct
 {
@@ -95,8 +107,8 @@ int camera_sw_jpeg_decode(camera_sw_jpeg_reader_fn reader,
     context.reader = reader;
     context.reader_context = reader_context;
     context.destination = output->data;
-    result = jd_prepare(&decoder, camera_sw_jpeg_input, work, work_size,
-                        &context);
+    result = camera_fw_jd_prepare(&decoder, camera_sw_jpeg_input, work, work_size,
+                                  &context);
     if (result != JDR_OK)
         return -(int)result;
 
@@ -117,7 +129,7 @@ int camera_sw_jpeg_decode(camera_sw_jpeg_reader_fn reader,
     scaled_height = (uint16_t)(decoder.height >> scale);
     context.width = scaled_width;
     context.height = scaled_height;
-    result = jd_decomp(&decoder, camera_sw_jpeg_output, (uint8_t)scale);
+    result = camera_fw_jd_decomp(&decoder, camera_sw_jpeg_output, (uint8_t)scale);
     if (result != JDR_OK)
         return -(int)result;
 

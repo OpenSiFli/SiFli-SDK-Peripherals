@@ -24,14 +24,11 @@
  *
  *  - **Streaming** (camera_start_stream / camera_get_stream_frame /
  *    camera_stop_stream):
- *    Double-buffered DMA streaming with a two-slot FIFO ready queue.
- *    Frames are pushed into the queue by camera_stream_frame_ready_callback,
- *    which runs in ISR context (via the bus-adapter callback chain) each time
- *    a DMA transfer completes.  The application thread dequeues frames one at
- *    a time via camera_get_stream_frame, which blocks on a semaphore until a
- *    frame is ready or the given timeout expires.  When the consumer is too
- *    slow and the two-slot queue is full, the oldest frame is silently
- *    overwritten and dropped_count is incremented.
+ *    DMA streaming with a four-slot FIFO ready queue. In FRAME mode, non-JPEG
+ *    drivers with frame-validity support keep only the latest borrowed frame;
+ *    a pending error is retained until consumed. Frames are pushed by the
+ *    bus-adapter callback, and camera_get_stream_frame waits on a semaphore
+ *    to retrieve them. Discarded descriptors increment dropped_count.
  *
  * @par Processing flow (typical single-sensor use)
  *
@@ -235,6 +232,13 @@ static void camera_stream_reset_queue(camera_handler_instance_t *instance)
     instance->stream.tail = 0;
     instance->stream.count = 0;
     instance->stream.dropped_count = 0;
+    /* The API lock excludes consumers while queue state and tokens reset. */
+    if (instance->stream.sem_initialized)
+    {
+        while (rt_sem_trytake(&instance->stream.frame_sem) == RT_EOK)
+        {
+        }
+    }
     jpeg->segment_mode = RT_FALSE;
     jpeg->ring_base = RT_NULL;
     jpeg->ring_size = 0;
@@ -330,6 +334,30 @@ static void camera_stream_enqueue_ready_frame(camera_handler_instance_t *instanc
 {
     rt_base_t level = rt_hw_interrupt_disable();
     rt_bool_t dropped = RT_FALSE;
+
+    if (!instance->stream.enabled)
+    {
+        rt_hw_interrupt_enable(level);
+        return;
+    }
+
+    if (instance->stream.mode == CAMERA_STREAM_MODE_FRAME &&
+        instance->active_config.pixformat != PIXFORMAT_JPEG &&
+        instance->device_ops->is_stream_frame_valid != RT_NULL &&
+        instance->stream.count != 0)
+    {
+        /* count remains set even after a consumer takes the semaphore token.
+         * Replace the descriptor without adding another token, so that the
+         * consumer always pops the latest frame. Keep a pending error intact. */
+        if (instance->stream.ready_frames[instance->stream.tail].error == RT_EOK)
+        {
+            instance->stream.ready_frames[instance->stream.tail] = *frame;
+        }
+        instance->stream.dropped_count++;
+        rt_hw_interrupt_enable(level);
+        return;
+    }
+
     if (instance->stream.count == CAMERA_STREAM_READY_DEPTH)
     {
         instance->stream.tail = (instance->stream.tail + 1) % CAMERA_STREAM_READY_DEPTH;
@@ -342,16 +370,17 @@ static void camera_stream_enqueue_ready_frame(camera_handler_instance_t *instanc
     instance->stream.ready_frames[instance->stream.head] = *frame;
     instance->stream.head = (instance->stream.head + 1) % CAMERA_STREAM_READY_DEPTH;
     instance->stream.count++;
-    rt_hw_interrupt_enable(level);
-
-    if (dropped && ((dropped_total == 1) || ((dropped_total & 0x1FU) == 0U)))
-    {
-        LOG_W("camera: stream queue full, dropped frames=%u", (unsigned int)dropped_total);
-    }
-
+    /* Publish the token with the descriptor so stop/reset cannot interleave. */
     if (instance->stream.sem_initialized && !dropped)
     {
         rt_sem_release(&instance->stream.frame_sem);
+    }
+    rt_hw_interrupt_enable(level);
+
+    if (dropped && instance->stream.mode == CAMERA_STREAM_MODE_FRAME &&
+        ((dropped_total == 1) || ((dropped_total & 0x1FU) == 0U)))
+    {
+        LOG_W("camera: stream queue full, dropped frames=%u", (unsigned int)dropped_total);
     }
 }
 
@@ -506,6 +535,12 @@ static void camera_stream_frame_ready_callback(void *context,
 
     if (instance == RT_NULL || frame == RT_NULL || !instance->stream.enabled)
     {
+        return;
+    }
+
+    if (frame->error != RT_EOK)
+    {
+        camera_stream_enqueue_ready_frame(instance, frame);
         return;
     }
 
@@ -695,7 +730,12 @@ camera_handle_status_t camera_deinit(camera_handler_instance_t **instance)
         handle->device_ops != RT_NULL &&
         handle->device_ops->close != RT_NULL)
     {
-        handle->device_ops->close();
+        result = (rt_err_t)handle->device_ops->close();
+        if (result != RT_EOK)
+        {
+            status = camera_status_from_rt_err(result);
+            goto out;
+        }
     }
 
     handle->is_open = RT_FALSE;
@@ -789,6 +829,41 @@ camera_handle_status_t camera_change_settings(camera_handler_instance_t *instanc
     }
 
     status = CAMERA_OK;
+
+out:
+    camera_api_unlock();
+    return status;
+}
+
+camera_handle_status_t camera_set_rotation(camera_handler_instance_t *instance,
+                                           uint16_t degrees)
+{
+    camera_handle_status_t status;
+    rt_err_t result;
+
+    status = camera_api_lock();
+    if (status != CAMERA_OK)
+    {
+        return status;
+    }
+    if (instance == RT_NULL || (degrees != 0U && degrees != 180U))
+    {
+        status = CAMERA_ERRORPARAMETER;
+        goto out;
+    }
+    status = camera_require_open(instance);
+    if (status != CAMERA_OK)
+    {
+        goto out;
+    }
+    if (instance->async_capture.in_flight || instance->stream.enabled ||
+        instance->device_ops->set_rotation == RT_NULL)
+    {
+        status = CAMERA_ERRORRESOURCE;
+        goto out;
+    }
+    result = (rt_err_t)instance->device_ops->set_rotation(degrees);
+    status = camera_status_from_rt_err(result);
 
 out:
     camera_api_unlock();
@@ -909,9 +984,11 @@ out:
     return status;
 }
 
-/** @brief Perform one blocking single-shot capture. */
-camera_handle_status_t camera_capture_single(camera_handler_instance_t *instance,
-                                             camera_capture_request_t *request)
+static camera_handle_status_t camera_capture_blocking(camera_handler_instance_t *instance,
+                                                      camera_capture_request_t *request,
+                                                      rt_bool_t timed,
+                                                      uint32_t timeout_ms,
+                                                      uint32_t frame_count)
 {
     camera_handle_status_t status;
     rt_size_t read_size;
@@ -930,7 +1007,9 @@ camera_handle_status_t camera_capture_single(camera_handler_instance_t *instance
 
     status = camera_require_open(instance);
     if (status != CAMERA_OK ||
-        instance->device_ops->capture == RT_NULL)
+        (frame_count != 0U ? instance->device_ops->capture_frames_timeout == RT_NULL :
+         timed ? instance->device_ops->capture_timeout == RT_NULL :
+                 instance->device_ops->capture == RT_NULL))
     {
         status = CAMERA_ERRORRESOURCE;
         goto out;
@@ -948,8 +1027,22 @@ camera_handle_status_t camera_capture_single(camera_handler_instance_t *instance
         goto out;
     }
 
-    read_size = instance->device_ops->capture(request->buffer,
-                                              request->buffer_size);
+    request->frame_size = 0;
+    if (frame_count != 0U)
+    {
+        read_size = instance->device_ops->capture_frames_timeout(request->buffer,
+                                                                 request->buffer_size,
+                                                                 frame_count,
+                                                                 timeout_ms);
+    }
+    else
+    {
+        read_size = timed ? instance->device_ops->capture_timeout(request->buffer,
+                                                                  request->buffer_size,
+                                                                  timeout_ms) :
+                            instance->device_ops->capture(request->buffer,
+                                                           request->buffer_size);
+    }
     if (read_size == 0)
     {
         request->frame_size = 0;
@@ -965,9 +1058,57 @@ out:
     return status;
 }
 
+camera_handle_status_t camera_capture_single(camera_handler_instance_t *instance,
+                                             camera_capture_request_t *request)
+{
+    return camera_capture_blocking(instance, request, RT_FALSE, 0U, 0U);
+}
+
+camera_handle_status_t camera_capture_single_timeout(camera_handler_instance_t *instance,
+                                                     camera_capture_request_t *request,
+                                                     uint32_t timeout_ms)
+{
+    return camera_capture_blocking(instance, request, RT_TRUE, timeout_ms, 0U);
+}
+
+camera_handle_status_t camera_capture_frames_timeout(camera_handler_instance_t *instance,
+                                                     camera_capture_request_t *request,
+                                                     uint32_t frame_count,
+                                                     uint32_t timeout_ms)
+{
+    if (frame_count == 0U)
+        return CAMERA_ERRORPARAMETER;
+    return camera_capture_blocking(instance, request, RT_TRUE, timeout_ms, frame_count);
+}
+
+camera_handle_status_t camera_stop_capture(camera_handler_instance_t *instance)
+{
+    camera_handle_status_t status = camera_api_lock();
+
+    if (status != CAMERA_OK)
+        return status;
+    if (instance == RT_NULL)
+        status = CAMERA_ERRORPARAMETER;
+    else if (camera_require_open(instance) != CAMERA_OK ||
+             instance->device_ops->stop_stream == RT_NULL ||
+             instance->async_capture.in_flight || instance->stream.enabled)
+        status = CAMERA_ERRORRESOURCE;
+    else
+        status = camera_status_from_rt_err(instance->device_ops->stop_stream());
+    camera_api_unlock();
+    return status;
+}
+
 /** @brief Start continuous stream using two caller-provided buffers. */
 camera_handle_status_t camera_start_stream(camera_handler_instance_t *instance,
                                            const camera_stream_config_t *config)
+{
+    return camera_start_stream_mode(instance, config, CAMERA_STREAM_MODE_FRAME);
+}
+
+camera_handle_status_t camera_start_stream_mode(camera_handler_instance_t *instance,
+                                                const camera_stream_config_t *config,
+                                                camera_stream_mode_t mode)
 {
     camera_handle_status_t status;
     camera_stream_start_args_t args;
@@ -993,21 +1134,17 @@ camera_handle_status_t camera_start_stream(camera_handler_instance_t *instance,
         goto out;
     }
 
-    if (config->buffers[0] == RT_NULL || config->buffer_size == 0)
+    if (config->buffers[0] == RT_NULL || config->buffer_size == 0 ||
+        (mode != CAMERA_STREAM_MODE_FRAME && mode != CAMERA_STREAM_MODE_HALF_FRAME))
     {
         status = CAMERA_ERRORPARAMETER;
         goto out;
     }
 
-    if (instance->active_config.pixformat == PIXFORMAT_JPEG &&
-        config->buffers[1] == RT_NULL)
-    {
-        status = CAMERA_ERRORPARAMETER;
-        goto out;
-    }
-
-    if (instance->active_config.pixformat != PIXFORMAT_JPEG &&
-        config->buffers[1] == RT_NULL)
+    if ((mode == CAMERA_STREAM_MODE_FRAME && config->buffers[1] == RT_NULL) ||
+        (mode == CAMERA_STREAM_MODE_HALF_FRAME &&
+         (config->buffers[1] != RT_NULL ||
+          instance->active_config.pixformat == PIXFORMAT_JPEG)))
     {
         status = CAMERA_ERRORPARAMETER;
         goto out;
@@ -1033,11 +1170,8 @@ camera_handle_status_t camera_start_stream(camera_handler_instance_t *instance,
         instance->stream.sem_initialized = RT_TRUE;
     }
 
-    while (rt_sem_trytake(&instance->stream.frame_sem) == RT_EOK)
-    {
-    }
-
     camera_stream_reset_queue(instance);
+    instance->stream.mode = mode;
     instance->stream.enabled = RT_TRUE;
     instance->stream.jpeg.segment_mode = (instance->active_config.pixformat == PIXFORMAT_JPEG) ? RT_TRUE : RT_FALSE;
     instance->stream.jpeg.ring_base = instance->stream.jpeg.segment_mode ? (uint8_t *)config->buffers[0] : RT_NULL;
@@ -1094,16 +1228,21 @@ camera_handle_status_t camera_start_stream(camera_handler_instance_t *instance,
     }
 
     args.buffers[0] = config->buffers[0];
-    args.buffers[1] = (config->buffers[1] != RT_NULL) ? config->buffers[1] : config->buffers[0];
+    args.buffers[1] = config->buffers[1];
     args.buffer_size = config->buffer_size;
     args.frame_callback = camera_stream_frame_ready_callback;
     args.callback_context = instance;
+    args.mode = mode;
 
     result = (rt_err_t)instance->device_ops->start_stream(&args);
     if (result != RT_EOK)
     {
-        instance->stream.enabled = RT_FALSE;
-        camera_stream_reset_queue(instance);
+        if (instance->device_ops->stop_stream != RT_NULL &&
+            instance->device_ops->stop_stream() == RT_EOK)
+        {
+            instance->stream.enabled = RT_FALSE;
+            camera_stream_reset_queue(instance);
+        }
         status = camera_status_from_rt_err(result);
         goto out;
     }
@@ -1167,6 +1306,25 @@ camera_handle_status_t camera_get_stream_frame(camera_handler_instance_t *instan
 out:
     camera_api_unlock();
     return status;
+}
+
+rt_bool_t camera_stream_frame_is_valid(camera_handler_instance_t *instance,
+                                       const camera_stream_frame_t *frame)
+{
+    rt_bool_t valid = RT_FALSE;
+
+    if (camera_api_lock() != CAMERA_OK)
+    {
+        return RT_FALSE;
+    }
+    if (camera_require_open(instance) == CAMERA_OK &&
+        instance->stream.enabled && frame != RT_NULL &&
+        instance->device_ops->is_stream_frame_valid != RT_NULL)
+    {
+        valid = instance->device_ops->is_stream_frame_valid(frame);
+    }
+    camera_api_unlock();
+    return valid;
 }
 
 /** @brief Stop stream and clear queue state. */

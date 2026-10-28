@@ -5,7 +5,7 @@ import re
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-DRIVER_DIR = ROOT / "camera" / "driver" / "gc032a"
+DRIVER_DIR = ROOT / "core" / "driver" / "gc032a"
 DRIVER_SOURCE = DRIVER_DIR / "gc032a.c"
 TABLE_RE = re.compile(
     r"\{\s*(0x[0-9a-fA-F]+)\s*,\s*(0x[0-9a-fA-F]+)\s*\}"

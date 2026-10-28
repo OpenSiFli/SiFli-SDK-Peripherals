@@ -1,4 +1,4 @@
-﻿# take_photo_to_sdcard (Streaming) Example
+# take_photo_to_sdcard (Streaming) Example
 
 [中文](README.md)
 
@@ -63,4 +63,4 @@ These buffers come from example-local PSRAM allocation logic, not from a framewo
 - the ready-frame queue depth is currently `4`
 - if SD write throughput is too low, you may see sequence jumps or dropped-frame growth
 - JPEG frames are saved as `.jpg`; RGB565 frames are converted to `.ppm`
-- SCCB / DVP / XCLK pin muxing is handled by the camera framework
+- SCCB / SPI / XCLK pin muxing is owned by the board's `bsp_pinmux.c`; the camera framework never calls `HAL_PIN_Set()` and carries no pin option

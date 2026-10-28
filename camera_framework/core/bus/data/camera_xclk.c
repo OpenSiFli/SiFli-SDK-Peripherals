@@ -1,147 +1,143 @@
 #include "camera_xclk.h"
 
-#include "bf0_hal.h"
-#include "drv_io.h"
 #include "rtthread.h"
 
 #define DBG_TAG "camera.xclk"
 #define DBG_LVL DBG_LOG
 #include <rtdbg.h>
 
-static GPT_HandleTypeDef s_xclk_gptim;
-static rt_bool_t s_xclk_initialized = RT_FALSE;
-static int s_xclk_pin = -1;
-static uint32_t s_xclk_channel = GPT_CHANNEL_1;
-
-int camera_xclk_start(int pin, uint32_t frequency_hz)
-{
-    HAL_StatusTypeDef status;
-    GPT_OC_InitTypeDef output_config = {0};
-    uint32_t timer_hz;
-    uint32_t period;
-    int ret;
-
-    if (pin < 0 || pin > 44)
-    {
-        return CAMERA_XCLK_INVALID;
-    }
-
-    if (s_xclk_initialized)
-    {
-        ret = camera_xclk_stop(s_xclk_pin);
-        if (ret != CAMERA_XCLK_OK)
-        {
-            return ret;
-        }
-    }
-
-    if (frequency_hz == 24000000U)
-    {
-        timer_hz = HAL_RCC_GetPCLKFreq(CORE_ID_HCPU, 1);
-        s_xclk_gptim.Instance = hwp_gptim1;
-        s_xclk_channel = GPT_CHANNEL_2;
-        HAL_PIN_Set(PAD_PA00 + pin, GPTIM1_CH2, PIN_NOPULL, 1);
-        HAL_RCC_EnableModule(RCC_MOD_GPTIM1);
-    }
-    else
-    {
-#if defined(SOC_SF32LB52X) && SOC_SF32LB52X == 1
-        timer_hz = 24000000U;
-#else
-        timer_hz = HAL_RCC_GetPCLKFreq(CORE_ID_HCPU, 1);
+/*
+ * The sensor master clock is a board fact, not a framework one:
+ *
+ *  - bsp_pinmux.c muxes the MCLK pad onto a timer channel;
+ *  - the board's Kconfig.board hardcodes CAMERA_XCLK_ENABLE and the PWM
+ *    device/channel that drive that pad (CAMERA_XCLK_PWM_DEVICE_NAME /
+ *    CAMERA_XCLK_PWM_CHANNEL), and may define CAMERA_XCLK_EXTERNAL_OSC when
+ *    the module carries its own oscillator.
+ *
+ * The framework therefore never looks for a pad, never guesses a channel and
+ * never carries a device name of its own: it programs the PWM the board named
+ * and nothing else.
+ *
+ * CAMERA_XCLK_ENABLE is owned by the board, CAMERA_XCLK_REQUIRED is derived
+ * by the framework (camera_framework/Kconfig) from the selected sensor, so the
+ * dependency only ever runs board -> framework:
+ *
+ *  - CAMERA_XCLK_ENABLE: the board says it feeds MCLK;
+ *  - CAMERA_XCLK_REQUIRED:  the compiled-in sensor cannot work without a clock
+ *    (an OV2640 behind an ArduCam FIFO module is the exception).
+ *
+ * "Needs a clock" must not be expressed as "the board declared one": a board
+ * that simply forgot the three symbols would otherwise compile a firmware whose
+ * sensor never answers SCCB. A sensor that needs MCLK without a board that
+ * supplies it is a build error, not a runtime surprise.
+ */
+#if defined(CAMERA_XCLK_REQUIRED) && !defined(CAMERA_XCLK_EXTERNAL_OSC) && \
+    !defined(CAMERA_XCLK_ENABLE)
+#error "this sensor needs an MCU camera MCLK: define CAMERA_XCLK_ENABLE, CAMERA_XCLK_PWM_DEVICE_NAME and CAMERA_XCLK_PWM_CHANNEL in the board's Kconfig.board, or define CAMERA_XCLK_EXTERNAL_OSC for a module with its own oscillator"
 #endif
-        s_xclk_gptim.Instance = hwp_gptim2;
-        s_xclk_channel = GPT_CHANNEL_1;
-        HAL_PIN_Set(PAD_PA00 + pin, GPTIM2_CH1, PIN_NOPULL, 1);
-        HAL_RCC_EnableModule(RCC_MOD_GPTIM2);
-    }
 
-    ret = camera_xclk_calculate_period(timer_hz, frequency_hz, &period);
-    if (ret != CAMERA_XCLK_OK)
-    {
-        LOG_E("invalid frequency %u Hz (timer=%u Hz)",
-              (unsigned int)frequency_hz,
-              (unsigned int)timer_hz);
-        return ret;
-    }
+#if defined(CAMERA_XCLK_ENABLE)
 
-    s_xclk_gptim.Init.Prescaler = 0;
-    s_xclk_gptim.Init.CounterMode = GPT_COUNTERMODE_UP;
-    s_xclk_gptim.Init.Period = period;
+/* FIXED_GPTBTIM_SRC_CLK (via register.h) bounds the fastest usable MCLK. */
+#include "bf0_hal.h"
+#include "rtdevice.h"
 
-    status = HAL_GPT_Base_Init(&s_xclk_gptim);
-    if (status != HAL_OK)
-    {
-        LOG_E("GPTIM2 base init failed: %d", status);
-        HAL_PIN_Set(PAD_PA00 + pin, GPIO_A0 + pin, PIN_NOPULL, 1);
-        return CAMERA_XCLK_HW;
-    }
+#if !defined(CAMERA_XCLK_PWM_DEVICE_NAME) || !defined(CAMERA_XCLK_PWM_CHANNEL)
+#error "the board's Kconfig.board must define CAMERA_XCLK_PWM_DEVICE_NAME and CAMERA_XCLK_PWM_CHANNEL for the camera MCLK"
+#endif
 
-    output_config.OCMode = GPT_OCMODE_PWM1;
-    output_config.Pulse = period / 2U + 1U;
-    output_config.OCPolarity = GPT_OCPOLARITY_HIGH;
-    output_config.OCFastMode = GPT_OCFAST_DISABLE;
-    status = HAL_GPT_PWM_ConfigChannel(&s_xclk_gptim,
-                                       &output_config,
-                                       s_xclk_channel);
-    if (status != HAL_OK)
-    {
-        LOG_E("GPTIM2 PWM config failed: %d", status);
-        HAL_GPT_Base_DeInit(&s_xclk_gptim);
-        HAL_PIN_Set(PAD_PA00 + pin, GPIO_A0 + pin, PIN_NOPULL, 1);
-        return CAMERA_XCLK_HW;
-    }
-
-    status = HAL_GPT_PWM_Start(&s_xclk_gptim, s_xclk_channel);
-    if (status != HAL_OK)
-    {
-        LOG_E("GPTIM2 PWM start failed: %d", status);
-        HAL_GPT_Base_DeInit(&s_xclk_gptim);
-        HAL_PIN_Set(PAD_PA00 + pin, GPIO_A0 + pin, PIN_NOPULL, 1);
-        return CAMERA_XCLK_HW;
-    }
-
-    s_xclk_initialized = RT_TRUE;
-    s_xclk_pin = pin;
-    rt_thread_mdelay(10);
-    LOG_I("%u Hz on PA%d (period=%u)",
-          (unsigned int)frequency_hz,
-          pin,
-          (unsigned int)period);
-    return CAMERA_XCLK_OK;
-}
-
-int camera_xclk_stop(int pin)
+static struct rt_device_pwm *camera_xclk_device(void)
 {
-    HAL_StatusTypeDef pwm_status;
-    HAL_StatusTypeDef base_status;
-    int active_pin;
+    struct rt_device_pwm *device =
+        (struct rt_device_pwm *)rt_device_find(CAMERA_XCLK_PWM_DEVICE_NAME);
 
-    if (!s_xclk_initialized)
-    {
-        return CAMERA_XCLK_OK;
-    }
+    if (device == RT_NULL)
+        LOG_E("find %s device failed", CAMERA_XCLK_PWM_DEVICE_NAME);
+    return device;
+}
 
-    active_pin = s_xclk_pin;
-    pwm_status = HAL_GPT_PWM_Stop(&s_xclk_gptim, s_xclk_channel);
-    base_status = HAL_GPT_Base_DeInit(&s_xclk_gptim);
-    s_xclk_initialized = RT_FALSE;
-    s_xclk_pin = -1;
+/* rt_pwm_set() takes nanoseconds; round up so the driven clock is never faster
+ * than the sensor asked for. */
+static uint32_t camera_xclk_period_ns(uint32_t frequency_hz)
+{
+    return (uint32_t)(2ULL * ((500000000ULL + frequency_hz - 1U) / frequency_hz));
+}
 
-    if (pin >= 0 && pin <= 44)
+int camera_xclk_start(uint32_t frequency_hz)
+{
+    struct rt_device_pwm *device;
+    uint32_t period_ns;
+    rt_err_t ret;
+
+    if (frequency_hz == 0U)
+        return CAMERA_XCLK_INVALID;
+#if defined(FIXED_GPTBTIM_SRC_CLK)
+    /* The pad can only be muxed to a channel of the fixed timer clock. */
+    if (frequency_hz > FIXED_GPTBTIM_SRC_CLK / 2U)
+        return CAMERA_XCLK_INVALID;
+#endif
+
+    device = camera_xclk_device();
+    if (device == RT_NULL)
+        return CAMERA_XCLK_HW;
+
+    period_ns = camera_xclk_period_ns(frequency_hz);
+    ret = rt_pwm_set(device, CAMERA_XCLK_PWM_CHANNEL, period_ns, period_ns / 2U);
+    if (ret != RT_EOK)
     {
-        active_pin = pin;
-    }
-    HAL_PIN_Set(PAD_PA00 + active_pin,
-                GPIO_A0 + active_pin,
-                PIN_NOPULL,
-                1);
-    if (pwm_status != HAL_OK || base_status != HAL_OK)
-    {
-        LOG_E("stop failed: pwm=%d base=%d", pwm_status, base_status);
+        LOG_E("XCLK PWM set failed: %d", ret);
         return CAMERA_XCLK_HW;
     }
 
-    LOG_I("stopped (PA%d)", active_pin);
+    ret = rt_pwm_enable(device, CAMERA_XCLK_PWM_CHANNEL);
+    if (ret != RT_EOK)
+    {
+        LOG_E("XCLK PWM enable failed: %d", ret);
+        return CAMERA_XCLK_HW;
+    }
+
+    LOG_I("requested=%u Hz period=%u ns on %s ch%d",
+          (unsigned int)frequency_hz, (unsigned int)period_ns,
+          CAMERA_XCLK_PWM_DEVICE_NAME, (int)CAMERA_XCLK_PWM_CHANNEL);
     return CAMERA_XCLK_OK;
 }
+
+int camera_xclk_stop(void)
+{
+    struct rt_device_pwm *device;
+    rt_err_t ret;
+
+    device = camera_xclk_device();
+    if (device == RT_NULL)
+        return CAMERA_XCLK_HW;
+
+    ret = rt_pwm_disable(device, CAMERA_XCLK_PWM_CHANNEL);
+    if (ret != RT_EOK)
+    {
+        LOG_E("XCLK PWM disable failed: %d", ret);
+        return CAMERA_XCLK_HW;
+    }
+
+    LOG_I("stopped (%s ch%d)", CAMERA_XCLK_PWM_DEVICE_NAME,
+          (int)CAMERA_XCLK_PWM_CHANNEL);
+    return CAMERA_XCLK_OK;
+}
+
+#else /* CAMERA_XCLK_ENABLE */
+
+/* No MCU clock is driven. That is legitimate only when the sensor does not need
+ * one (checked above: CAMERA_XCLK_REQUIRED with CAMERA_XCLK_EXTERNAL_OSC). */
+int camera_xclk_start(uint32_t frequency_hz)
+{
+    LOG_W("board declares no MCU camera MCLK; requested %u Hz is not driven "
+          "(module uses its own oscillator)", (unsigned int)frequency_hz);
+    return CAMERA_XCLK_OK;
+}
+
+int camera_xclk_stop(void)
+{
+    return CAMERA_XCLK_OK;
+}
+
+#endif /* CAMERA_XCLK_ENABLE */

@@ -153,6 +153,16 @@ int bus_adapter_start_capture(bus_adapter_t *self, void *buffer, uint32_t size)
     return self->ops->start_capture(self, buffer, size);
 }
 
+int bus_adapter_start_capture_frames(bus_adapter_t *self, void *buffer,
+                                     uint32_t size, uint32_t frame_count)
+{
+    if (bus_adapter_check(self) != BUS_OK || buffer == NULL || size == 0U || frame_count == 0U)
+        return BUS_ERR_INVALID;
+    if (!self->ops->start_capture_frames)
+        return BUS_ERR_NOT_SUPPORTED;
+    return self->ops->start_capture_frames(self, buffer, size, frame_count);
+}
+
 /** @brief Wrapper for rearm_capture op. */
 int bus_adapter_rearm_capture(bus_adapter_t *self, void *buffer, uint32_t size)
 {
@@ -191,6 +201,30 @@ int bus_adapter_set_mode(bus_adapter_t *self, bus_capture_mode_t mode)
     if (!self->ops->set_mode)
         return BUS_ERR_NOT_SUPPORTED;
     return self->ops->set_mode(self, mode);
+}
+
+int bus_adapter_start_stream(bus_adapter_t *self, const bus_stream_config_t *config)
+{
+    if (bus_adapter_check(self) != BUS_OK || config == NULL ||
+        config->buffers[0] == NULL ||
+        config->buffer_size == 0 || config->frame_callback == NULL ||
+        (config->mode != BUS_STREAM_MODE_FRAME &&
+         config->mode != BUS_STREAM_MODE_HALF_FRAME) ||
+        (config->mode == BUS_STREAM_MODE_FRAME && config->buffers[1] == NULL) ||
+        (config->mode == BUS_STREAM_MODE_HALF_FRAME && config->buffers[1] != NULL))
+        return BUS_ERR_INVALID;
+    if (!self->ops->start_stream)
+        return BUS_ERR_NOT_SUPPORTED;
+    return self->ops->start_stream(self, config);
+}
+
+int bus_adapter_stream_frame_valid(bus_adapter_t *self, const bus_stream_frame_t *frame)
+{
+    if (bus_adapter_check(self) != BUS_OK || frame == NULL ||
+        frame->buffer == NULL || frame->size == 0 || frame->error != BUS_OK ||
+        !self->ops->stream_frame_valid)
+        return 0;
+    return self->ops->stream_frame_valid(self, frame) > 0;
 }
 
 /** @brief Call optional adapter dump_state hook. */

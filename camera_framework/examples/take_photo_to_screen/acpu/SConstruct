@@ -1,0 +1,35 @@
+import os
+import rtconfig
+
+SIFLI_SDK = os.getenv('SIFLI_SDK')
+if not SIFLI_SDK:
+    print('Please source export.sh in the SiFli SDK first.')
+    exit()
+from building import *
+
+try:
+    Import('CAMERA_SOFTWARE_ROOT', 'CAMERA_ISP_ROOT', 'CAMERA_JPEG_ROOT',
+           'CAMERA_SW_ISP_RUN_ON_ACPU', 'CAMERA_SW_JPEG_RUN_ON_ACPU',
+           'CAMERA_SW_JPEG_ENCODER', 'CAMERA_SW_JPEG_DECODER')
+except Exception:
+    CAMERA_SOFTWARE_ROOT = os.path.abspath(
+        os.path.join(GetCurrentDir(), '../components/camera_software'))
+    CAMERA_ISP_ROOT = os.path.abspath(
+        os.path.join(CAMERA_SOFTWARE_ROOT, '../../../../software/isp'))
+    CAMERA_JPEG_ROOT = os.path.abspath(
+        os.path.join(CAMERA_SOFTWARE_ROOT, '../../../../software/jpeg'))
+    CAMERA_SW_ISP_RUN_ON_ACPU = GetDepend(['CAMERA_SW_ISP_RUN_ON_ACPU'])
+    CAMERA_SW_JPEG_RUN_ON_ACPU = GetDepend(['CAMERA_SW_JPEG_RUN_ON_ACPU'])
+    CAMERA_SW_JPEG_ENCODER = GetDepend(['CAMERA_SW_JPEG_ENCODER'])
+    CAMERA_SW_JPEG_DECODER = GetDepend(['CAMERA_SW_JPEG_DECODER'])
+Export('SIFLI_SDK', 'CAMERA_SOFTWARE_ROOT', 'CAMERA_ISP_ROOT',
+       'CAMERA_JPEG_ROOT',
+       'CAMERA_SW_ISP_RUN_ON_ACPU', 'CAMERA_SW_JPEG_RUN_ON_ACPU',
+       'CAMERA_SW_JPEG_ENCODER', 'CAMERA_SW_JPEG_DECODER')
+
+PrepareEnv()
+SifliEnv()
+
+target = rtconfig.OUTPUT_DIR + rtconfig.TARGET_NAME + '.' + rtconfig.TARGET_EXT
+objects = PrepareBuilding(None)
+DoBuilding(target, objects)

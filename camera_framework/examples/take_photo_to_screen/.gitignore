@@ -1,0 +1,15 @@
+*.bak
+*.un~
+*.*~
+*.scvd
+*.old
+*.uvoptx
+/**/build_*/
+/**/build/
+/**/__pycache__/
+/**/*.pyc
+.sconsign.dblite
+.DS_Store
+.idea
+.vscode
+Kconfig.tmp

@@ -24,6 +24,7 @@ typedef struct
   rt_size_t buffer_size;                     /* size of each buffer in bytes  */
   camera_stream_frame_callback_t frame_callback; /* per-frame notify callback */
   void *callback_context;                    /* opaque callback user pointer   */
+  camera_stream_mode_t mode;
 } camera_stream_start_args_t;
 
 struct camera_device_ops
@@ -36,12 +37,17 @@ struct camera_device_ops
   int (*set_framesize)(framesize_t framesize);
   int (*set_quality)(uint8_t quality);
   rt_size_t (*capture)(void *buffer, rt_size_t buffer_size); /* blocking single-shot */
+  rt_size_t (*capture_timeout)(void *buffer, rt_size_t buffer_size, uint32_t timeout_ms);
   int (*capture_async)(void *buffer,
                        rt_size_t buffer_size,
                        camera_capture_done_callback_t callback,
                        void *context);       /* non-blocking single-shot */
   int (*start_stream)(const camera_stream_start_args_t *args);
   int (*stop_stream)(void);
+  rt_bool_t (*is_stream_frame_valid)(const camera_stream_frame_t *frame);
+  int (*set_rotation)(uint16_t degrees);      /* optional 0/180 sensor rotation */
+  rt_size_t (*capture_frames_timeout)(void *buffer, rt_size_t buffer_size,
+                                      uint32_t frame_count, uint32_t timeout_ms);
 };
 
 typedef struct
@@ -77,6 +83,7 @@ typedef struct
 typedef struct
 {
   rt_bool_t enabled;
+  camera_stream_mode_t mode;
   struct rt_semaphore frame_sem;
   rt_bool_t sem_initialized;
   camera_stream_frame_t ready_frames[4];

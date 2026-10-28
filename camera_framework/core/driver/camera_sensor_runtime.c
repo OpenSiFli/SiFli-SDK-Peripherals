@@ -6,6 +6,9 @@
 #define DBG_LVL DBG_INFO
 #include <rtdbg.h>
 
+/* How long arming one capture waits for the previous one to retire. */
+#define CAMERA_SENSOR_BUSY_RETRY_MS 50U
+
 typedef struct
 {
     uint16_t width;
@@ -43,7 +46,8 @@ static rt_int32_t camera_sensor_timeout_ticks(uint32_t timeout_ms)
     {
         return 0;
     }
-    return (rt_int32_t)((timeout_ms * RT_TICK_PER_SECOND + 999U) / 1000U);
+    uint64_t ticks = ((uint64_t)timeout_ms * RT_TICK_PER_SECOND + 999U) / 1000U;
+    return ticks > INT32_MAX ? INT32_MAX : (rt_int32_t)ticks;
 }
 
 static uint32_t camera_sensor_bytes_per_pixel(pixformat_t pixformat)
@@ -78,14 +82,20 @@ static int camera_sensor_bus_mode(pixformat_t pixformat,
     }
 }
 
-static void camera_sensor_stop_capture(camera_sensor_runtime_t *runtime)
+static int camera_sensor_stop_capture(camera_sensor_runtime_t *runtime)
 {
+    int ret;
+
     if (runtime->data_bus == RT_NULL)
     {
-        return;
+        return RT_EOK;
     }
-    bus_adapter_stop(runtime->data_bus);
-    bus_adapter_abort_capture(runtime->data_bus);
+    ret = bus_adapter_stop(runtime->data_bus);
+    if (ret != BUS_OK)
+    {
+        return ret;
+    }
+    return bus_adapter_abort_capture(runtime->data_bus);
 }
 
 static void camera_sensor_frame_ready(void *buffer, uint32_t length, void *user)
@@ -104,7 +114,7 @@ static void camera_sensor_frame_ready(void *buffer, uint32_t length, void *user)
 
     if (frame_callback != RT_NULL)
     {
-        camera_stream_frame_t frame;
+        camera_stream_frame_t frame = {0};
 
         if (runtime->pixformat == PIXFORMAT_JPEG &&
             runtime->data_bus != RT_NULL &&
@@ -126,6 +136,7 @@ static void camera_sensor_frame_ready(void *buffer, uint32_t length, void *user)
         frame.frame_size = frame_size;
         frame.sequence = ++stream->sequence;
         frame.is_complete = RT_TRUE;
+        frame.timestamp_ticks = rt_tick_get();
         stream->active_buffer_index ^= 1U;
 
         if (bus_adapter_rearm_capture(runtime->data_bus,
@@ -142,6 +153,14 @@ static void camera_sensor_frame_ready(void *buffer, uint32_t length, void *user)
 
     if (runtime->pixformat == PIXFORMAT_JPEG)
     {
+#if defined(CAMERA_DVP_BACKEND_DCMI)
+        /* DCMI delivers one stopped, bounded JPEG frame in the caller's
+         * buffer. No segment assembly or second image copy is needed. */
+        const uint8_t *jpeg = buffer;
+        frame_size = jpeg != RT_NULL && length >= 4U &&
+                     jpeg[0] == 0xffU && jpeg[1] == 0xd8U &&
+                     jpeg[length - 2U] == 0xffU && jpeg[length - 1U] == 0xd9U ? length : 0U;
+#else
         camera_jpeg_result_t result = camera_jpeg_assembler_feed(
             &runtime->jpeg_single, (const uint8_t *)buffer, length);
         if (result == CAMERA_JPEG_INCOMPLETE)
@@ -150,8 +169,14 @@ static void camera_sensor_frame_ready(void *buffer, uint32_t length, void *user)
         }
         frame_size = (result == CAMERA_JPEG_COMPLETE) ?
                      runtime->jpeg_single.frame_size : 0;
+#endif
     }
 
+    /* Stop before waking the caller: it may immediately request another frame.
+     * The backend may still be leaving its callback after this function returns;
+     * camera_stop_capture must also succeed before the caller releases memory. */
+    if (camera_sensor_stop_capture(runtime) != RT_EOK)
+        frame_size = 0;
     level = rt_hw_interrupt_disable();
     runtime->last_frame_size = frame_size;
     async_callback = runtime->async_capture.callback;
@@ -166,12 +191,67 @@ static void camera_sensor_frame_ready(void *buffer, uint32_t length, void *user)
         async_callback(async_context,
                        frame_size > 0 ? CAMERA_OK : CAMERA_ERRORTIMEOUT,
                        frame_size);
-        camera_sensor_stop_capture(runtime);
         return;
     }
 
     rt_sem_release(&runtime->frame_sem);
-    camera_sensor_stop_capture(runtime);
+}
+
+static void camera_sensor_native_frame_ready(void *context,
+                                             const bus_stream_frame_t *event)
+{
+    camera_sensor_runtime_t *runtime = (camera_sensor_runtime_t *)context;
+    camera_stream_frame_t frame = {0};
+    camera_stream_frame_callback_t callback;
+    void *callback_context;
+    rt_base_t level;
+
+    if (runtime == RT_NULL || event == RT_NULL)
+    {
+        return;
+    }
+
+    level = rt_hw_interrupt_disable();
+    if (!runtime->is_open || !runtime->stream.native_mode ||
+        runtime->stream.frame_callback == RT_NULL)
+    {
+        rt_hw_interrupt_enable(level);
+        return;
+    }
+    callback = runtime->stream.frame_callback;
+    callback_context = runtime->stream.callback_context;
+    frame.buffer = event->buffer;
+    frame.buffer_size = runtime->stream.buffer_size;
+    frame.frame_size = event->size;
+    frame.sequence = event->sequence;
+    frame.timestamp_ticks = event->timestamp_ticks;
+    frame.error = event->error;
+    if (event->event_type == BUS_STREAM_EVENT_HALF_FIRST)
+        frame.event_type = CAMERA_STREAM_EVENT_HALF_FIRST;
+    else if (event->event_type == BUS_STREAM_EVENT_HALF_SECOND)
+        frame.event_type = CAMERA_STREAM_EVENT_HALF_SECOND;
+    else
+        frame.event_type = CAMERA_STREAM_EVENT_FRAME;
+    frame.is_complete = event->error == BUS_OK &&
+                        frame.event_type != CAMERA_STREAM_EVENT_HALF_FIRST;
+    frame.buffer_index = UINT8_MAX;
+    if (event->buffer == runtime->stream.buffers[0])
+    {
+        frame.buffer_index = 0;
+    }
+    else if (event->buffer == runtime->stream.buffers[1])
+    {
+        frame.buffer_index = 1;
+    }
+    rt_hw_interrupt_enable(level);
+
+    if (frame.error == RT_EOK &&
+        (frame.buffer_index == UINT8_MAX || frame.frame_size == 0 ||
+         frame.frame_size > frame.buffer_size))
+    {
+        return;
+    }
+    callback(callback_context, &frame);
 }
 
 int camera_sensor_runtime_open(camera_sensor_runtime_t *runtime,
@@ -188,6 +268,11 @@ int camera_sensor_runtime_open(camera_sensor_runtime_t *runtime,
     if (runtime->is_open)
     {
         return RT_EOK;
+    }
+    rt_memset(&bus_config, 0, sizeof(bus_config));
+    if (config->serial != RT_NULL)
+    {
+        bus_config.serial = *config->serial;
     }
     if (camera_sensor_bus_mode(config->default_config->pixformat,
                                &bus_config.mode) != RT_EOK)
@@ -239,6 +324,8 @@ int camera_sensor_runtime_open(camera_sensor_runtime_t *runtime,
 
 int camera_sensor_runtime_close(camera_sensor_runtime_t *runtime)
 {
+    int ret;
+
     if (runtime == RT_NULL)
     {
         return -RT_EINVAL;
@@ -248,10 +335,17 @@ int camera_sensor_runtime_close(camera_sensor_runtime_t *runtime)
         return RT_EOK;
     }
 
+    ret = camera_sensor_stop_capture(runtime);
+    if (ret != BUS_OK)
+    {
+        return ret;
+    }
+    ret = bus_adapter_deinit(runtime->data_bus);
+    if (ret != BUS_OK)
+    {
+        return ret;
+    }
     camera_sensor_stream_reset(&runtime->stream);
-    bus_adapter_abort_capture(runtime->data_bus);
-    bus_adapter_stop(runtime->data_bus);
-    bus_adapter_deinit(runtime->data_bus);
     runtime->data_bus = RT_NULL;
     rt_sem_detach(&runtime->frame_sem);
     runtime->is_open = RT_FALSE;
@@ -280,7 +374,11 @@ int camera_sensor_runtime_set_pixformat(camera_sensor_runtime_t *runtime,
         return -RT_EINVAL;
     }
 
-    bus_adapter_stop(runtime->data_bus);
+    ret = bus_adapter_stop(runtime->data_bus);
+    if (ret != BUS_OK)
+    {
+        return ret;
+    }
     ret = bus_adapter_set_mode(runtime->data_bus, mode);
     if (ret != BUS_OK)
     {
@@ -331,15 +429,51 @@ int camera_sensor_runtime_set_framesize(camera_sensor_runtime_t *runtime,
     return RT_EOK;
 }
 
-rt_size_t camera_sensor_runtime_capture(camera_sensor_runtime_t *runtime,
-                                        void *buffer,
-                                        rt_size_t size)
+/*
+ * Arm one capture, tolerating a backend that is still retiring the previous
+ * one.
+ *
+ * A blocking capture is woken from inside the backend's completion callback, so
+ * a caller that immediately requests the next frame reaches the backend while
+ * that callback is still on its way out: the deferred work has not cleared its
+ * "dispatching" flag yet, and the DMA abort of the finished transfer may still
+ * be settling. Both surface as -RT_EBUSY, which is transient here rather than a
+ * real conflict; without this retry a burst of back-to-back single shots fails
+ * every frame after the first one instantly.
+ */
+static int camera_sensor_start_capture(camera_sensor_runtime_t *runtime,
+                                       void *buffer, rt_size_t size,
+                                       uint32_t frame_count)
+{
+    rt_tick_t started = rt_tick_get();
+    int ret;
+
+    for (;;)
+    {
+        ret = frame_count != 0U ?
+              bus_adapter_start_capture_frames(runtime->data_bus, buffer, size,
+                                               frame_count) :
+              bus_adapter_start_capture(runtime->data_bus, buffer, size);
+        if (ret != -RT_EBUSY)
+            return ret;
+        if ((rt_tick_t)(rt_tick_get() - started) >=
+            rt_tick_from_millisecond(CAMERA_SENSOR_BUSY_RETRY_MS))
+            return ret;
+        rt_thread_mdelay(1);
+    }
+}
+
+static rt_size_t camera_sensor_runtime_capture_blocking(camera_sensor_runtime_t *runtime,
+                                                        void *buffer,
+                                                        rt_size_t size,
+                                                        uint32_t timeout_ms,
+                                                        uint32_t frame_count)
 {
     rt_err_t ret;
     rt_size_t frame_size;
 
     if (runtime == RT_NULL || !runtime->is_open || buffer == RT_NULL || size == 0 ||
-        runtime->async_capture.in_flight)
+        camera_sensor_runtime_busy(runtime))
     {
         return 0;
     }
@@ -351,14 +485,14 @@ rt_size_t camera_sensor_runtime_capture(camera_sensor_runtime_t *runtime,
         camera_jpeg_assembler_reset(&runtime->jpeg_single, buffer, size);
     }
 
-    ret = bus_adapter_start_capture(runtime->data_bus, buffer, size);
+    ret = camera_sensor_start_capture(runtime, buffer, size, frame_count);
     if (ret != RT_EOK && ret != BUS_OK)
     {
         return 0;
     }
 
     ret = rt_sem_take(&runtime->frame_sem,
-                      camera_sensor_timeout_ticks(runtime->frame_timeout_ms));
+                      camera_sensor_timeout_ticks(timeout_ms));
     if (ret != RT_EOK)
     {
         LOG_W("capture timeout: pix=%d frame=%d req=%u",
@@ -374,6 +508,33 @@ rt_size_t camera_sensor_runtime_capture(camera_sensor_runtime_t *runtime,
     frame_size = runtime->last_frame_size;
     rt_hw_interrupt_enable(level);
     return frame_size;
+}
+
+rt_size_t camera_sensor_runtime_capture_timeout(camera_sensor_runtime_t *runtime,
+                                                void *buffer,
+                                                rt_size_t size,
+                                                uint32_t timeout_ms)
+{
+    return camera_sensor_runtime_capture_blocking(runtime, buffer, size, timeout_ms, 0U);
+}
+
+rt_size_t camera_sensor_runtime_capture_frames_timeout(camera_sensor_runtime_t *runtime,
+                                                       void *buffer,
+                                                       rt_size_t size,
+                                                       uint32_t frame_count,
+                                                       uint32_t timeout_ms)
+{
+    if (frame_count == 0U || runtime == RT_NULL || runtime->pixformat != PIXFORMAT_JPEG)
+        return 0U;
+    return camera_sensor_runtime_capture_blocking(runtime, buffer, size, timeout_ms, frame_count);
+}
+
+rt_size_t camera_sensor_runtime_capture(camera_sensor_runtime_t *runtime,
+                                        void *buffer,
+                                        rt_size_t size)
+{
+    return camera_sensor_runtime_capture_timeout(runtime, buffer, size,
+                                                 runtime != RT_NULL ? runtime->frame_timeout_ms : 0U);
 }
 
 int camera_sensor_runtime_capture_async(camera_sensor_runtime_t *runtime,
@@ -410,7 +571,7 @@ int camera_sensor_runtime_capture_async(camera_sensor_runtime_t *runtime,
         camera_jpeg_assembler_reset(&runtime->jpeg_single, buffer, size);
     }
 
-    ret = bus_adapter_start_capture(runtime->data_bus, buffer, size);
+    ret = camera_sensor_start_capture(runtime, buffer, size, 0U);
     if (ret != RT_EOK && ret != BUS_OK)
     {
         level = rt_hw_interrupt_disable();
@@ -427,19 +588,53 @@ int camera_sensor_runtime_start_stream(camera_sensor_runtime_t *runtime,
                                        const camera_stream_start_args_t *args)
 {
     rt_base_t level;
+    rt_bool_t native_mode;
+    uint32_t expected_size = 0U;
     int ret;
 
     if (runtime == RT_NULL || !runtime->is_open || args == RT_NULL ||
-        args->buffers[0] == RT_NULL || args->buffers[1] == RT_NULL ||
-        args->buffer_size == 0)
+        args->buffers[0] == RT_NULL ||
+        args->buffer_size == 0 || args->buffer_size > UINT32_MAX ||
+        args->frame_callback == RT_NULL ||
+        (args->mode != CAMERA_STREAM_MODE_FRAME &&
+         args->mode != CAMERA_STREAM_MODE_HALF_FRAME) ||
+        (args->mode == CAMERA_STREAM_MODE_FRAME && args->buffers[1] == RT_NULL) ||
+        (args->mode == CAMERA_STREAM_MODE_HALF_FRAME && args->buffers[1] != RT_NULL))
     {
         return -RT_EINVAL;
     }
-    if (runtime->async_capture.in_flight)
+    if (camera_sensor_runtime_busy(runtime))
     {
         return -RT_EBUSY;
     }
 
+    native_mode = runtime->data_bus != RT_NULL &&
+                  runtime->data_bus->ops != RT_NULL &&
+                  runtime->data_bus->ops->start_stream != RT_NULL;
+    if (args->mode == CAMERA_STREAM_MODE_HALF_FRAME && !native_mode)
+        return -RT_ENOSYS;
+    if (native_mode)
+    {
+        uint16_t width, height;
+        uint32_t bytes_per_pixel = camera_sensor_bytes_per_pixel(runtime->pixformat);
+        uint64_t bytes;
+
+        if (bytes_per_pixel == 0U ||
+            camera_sensor_get_resolution(runtime->framesize, &width, &height) != RT_EOK)
+        {
+            return -RT_EINVAL;
+        }
+        bytes = (uint64_t)width * height * bytes_per_pixel;
+        if (bytes == 0U || bytes > UINT32_MAX || bytes > args->buffer_size ||
+            (args->mode == CAMERA_STREAM_MODE_HALF_FRAME &&
+             (bytes != args->buffer_size || (height & 1U) != 0U)))
+        {
+            return -RT_EINVAL;
+        }
+        expected_size = (uint32_t)bytes;
+    }
+    runtime->stream.native_mode = native_mode;
+    runtime->stream.mode = args->mode;
     runtime->stream.buffers[0] = args->buffers[0];
     runtime->stream.buffers[1] = args->buffers[1];
     runtime->stream.buffer_size = args->buffer_size;
@@ -450,15 +645,34 @@ int camera_sensor_runtime_start_stream(camera_sensor_runtime_t *runtime,
     runtime->stream.frame_callback = args->frame_callback;
     rt_hw_interrupt_enable(level);
 
-    ret = bus_adapter_start_capture(runtime->data_bus,
-                                    runtime->stream.buffers[0],
-                                    runtime->stream.buffer_size);
+    if (runtime->stream.native_mode)
+    {
+        bus_stream_config_t config = {0};
+        config.buffers[0] = runtime->stream.buffers[0];
+        config.buffers[1] = runtime->stream.buffers[1];
+        config.buffer_size = (uint32_t)runtime->stream.buffer_size;
+        config.expected_frame_size = expected_size;
+        config.mode = args->mode == CAMERA_STREAM_MODE_HALF_FRAME ?
+                      BUS_STREAM_MODE_HALF_FRAME : BUS_STREAM_MODE_FRAME;
+        config.frame_callback = camera_sensor_native_frame_ready;
+        config.callback_context = runtime;
+        ret = bus_adapter_start_stream(runtime->data_bus, &config);
+    }
+    else
+    {
+        ret = bus_adapter_start_capture(runtime->data_bus,
+                                        runtime->stream.buffers[0],
+                                        runtime->stream.buffer_size);
+    }
     if (ret != RT_EOK && ret != BUS_OK)
     {
-        level = rt_hw_interrupt_disable();
-        camera_sensor_stream_reset(&runtime->stream);
-        rt_hw_interrupt_enable(level);
-        return -RT_ERROR;
+        if (camera_sensor_stop_capture(runtime) == BUS_OK)
+        {
+            level = rt_hw_interrupt_disable();
+            camera_sensor_stream_reset(&runtime->stream);
+            rt_hw_interrupt_enable(level);
+        }
+        return ret;
     }
     return RT_EOK;
 }
@@ -466,17 +680,62 @@ int camera_sensor_runtime_start_stream(camera_sensor_runtime_t *runtime,
 int camera_sensor_runtime_stop_stream(camera_sensor_runtime_t *runtime)
 {
     rt_base_t level;
+    int ret;
 
     if (runtime == RT_NULL || !runtime->is_open)
     {
         return -RT_ERROR;
     }
 
+    ret = camera_sensor_stop_capture(runtime);
+    if (ret != BUS_OK)
+    {
+        return ret;
+    }
     level = rt_hw_interrupt_disable();
     camera_sensor_stream_reset(&runtime->stream);
     rt_hw_interrupt_enable(level);
-    camera_sensor_stop_capture(runtime);
     return RT_EOK;
+}
+
+rt_bool_t camera_sensor_runtime_stream_frame_is_valid(
+    camera_sensor_runtime_t *runtime, const camera_stream_frame_t *frame)
+{
+    bus_stream_frame_t bus_frame = {0};
+    rt_bool_t valid = RT_FALSE;
+    rt_base_t level;
+
+    if (runtime == RT_NULL || frame == RT_NULL)
+    {
+        return RT_FALSE;
+    }
+    level = rt_hw_interrupt_disable();
+    if (runtime->is_open && runtime->stream.native_mode &&
+        runtime->stream.frame_callback != RT_NULL && frame->error == RT_EOK &&
+        ((runtime->stream.mode == CAMERA_STREAM_MODE_FRAME &&
+          frame->event_type == CAMERA_STREAM_EVENT_FRAME && frame->is_complete) ||
+         (runtime->stream.mode == CAMERA_STREAM_MODE_HALF_FRAME &&
+          (frame->event_type == CAMERA_STREAM_EVENT_HALF_FIRST ||
+           frame->event_type == CAMERA_STREAM_EVENT_HALF_SECOND))) &&
+        frame->buffer != RT_NULL &&
+        frame->buffer_index < 2 &&
+        frame->buffer == runtime->stream.buffers[frame->buffer_index] &&
+        frame->buffer_size == runtime->stream.buffer_size &&
+        frame->frame_size > 0 && frame->frame_size <= frame->buffer_size)
+    {
+        bus_frame.buffer = frame->buffer;
+        bus_frame.size = (uint32_t)frame->frame_size;
+        bus_frame.sequence = frame->sequence;
+        bus_frame.error = frame->error;
+        bus_frame.timestamp_ticks = frame->timestamp_ticks;
+        if (frame->event_type == CAMERA_STREAM_EVENT_HALF_FIRST)
+            bus_frame.event_type = BUS_STREAM_EVENT_HALF_FIRST;
+        else if (frame->event_type == CAMERA_STREAM_EVENT_HALF_SECOND)
+            bus_frame.event_type = BUS_STREAM_EVENT_HALF_SECOND;
+        valid = bus_adapter_stream_frame_valid(runtime->data_bus, &bus_frame);
+    }
+    rt_hw_interrupt_enable(level);
+    return valid;
 }
 
 int camera_sensor_get_resolution(framesize_t framesize,
