@@ -2,6 +2,7 @@
 
 #include "app/camera_app.h"
 #include "input/camera_keys.h"
+#include "storage/photo_storage.h"
 
 #if defined(USING_BUTTON_LIB)
 /* Album browsing and the next-photo key are not part of this example (yet), so

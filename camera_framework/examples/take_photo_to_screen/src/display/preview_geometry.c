@@ -4,6 +4,52 @@
 
 #define PREVIEW_EPIC_SCALE_NONE 1024U
 
+static void preview_geometry_rotated_size(uint16_t source_width,
+                                          uint16_t source_height,
+                                          uint16_t angle_tenths,
+                                          uint16_t *rotated_width,
+                                          uint16_t *rotated_height)
+{
+    if ((angle_tenths == 900U) || (angle_tenths == 2700U))
+    {
+        *rotated_width = source_height;
+        *rotated_height = source_width;
+    }
+    else
+    {
+        *rotated_width = source_width;
+        *rotated_height = source_height;
+    }
+}
+
+int preview_viewport_calculate(uint16_t panel_width, uint16_t panel_height,
+                               uint16_t source_width, uint16_t source_height,
+                               uint16_t angle_tenths, int full_panel,
+                               preview_viewport_t *viewport)
+{
+    uint16_t rotated_width;
+    uint16_t rotated_height;
+
+    if ((viewport == NULL) || (panel_width == 0U) || (panel_height == 0U) ||
+        (source_width == 0U) || (source_height == 0U))
+        return -1;
+
+    if (full_panel != 0)
+    {
+        viewport->width = panel_width;
+        viewport->height = panel_height;
+        return 0;
+    }
+
+    preview_geometry_rotated_size(source_width, source_height, angle_tenths,
+                                  &rotated_width, &rotated_height);
+    viewport->width = (panel_width < rotated_width) ? panel_width
+                                                    : rotated_width;
+    viewport->height = (panel_height < rotated_height) ? panel_height
+                                                       : rotated_height;
+    return 0;
+}
+
 int preview_geometry_calculate(uint16_t source_width, uint16_t source_height,
                                uint16_t display_width, uint16_t display_height,
                                uint16_t angle_tenths,
@@ -11,19 +57,15 @@ int preview_geometry_calculate(uint16_t source_width, uint16_t source_height,
 {
     uint32_t scaled_width;
     uint32_t scaled_height;
-    uint16_t rotated_width = source_width;
-    uint16_t rotated_height = source_height;
+    uint16_t rotated_width;
+    uint16_t rotated_height;
 
     if ((geometry == NULL) || (source_width == 0U) || (source_height == 0U) ||
         (display_width == 0U) || (display_height == 0U))
         return -1;
 
-    /* Quarter turns swap the axes of the scaled rectangle. */
-    if ((angle_tenths == 900U) || (angle_tenths == 2700U))
-    {
-        rotated_width = source_height;
-        rotated_height = source_width;
-    }
+    preview_geometry_rotated_size(source_width, source_height, angle_tenths,
+                                  &rotated_width, &rotated_height);
 
     if ((uint64_t)display_width * rotated_height >=
         (uint64_t)display_height * rotated_width)

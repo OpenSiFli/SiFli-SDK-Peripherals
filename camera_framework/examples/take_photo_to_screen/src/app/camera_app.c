@@ -19,6 +19,7 @@
 #include "../display/camera_display.h"
 #include "../image_processing/camera_image_processor.h"
 #include "../storage/photo_storage.h"
+#include "camera_app_config.h"
 #include "camera_handle.h"
 #include "camera_xclk.h"
 #include "camera_isp_flags.h"
@@ -88,8 +89,6 @@ L2_NON_RET_BSS_SECT(camera_app_buffers,
                         uint8_t dma[2][CAMERA_APP_FRAME_MAX_BYTES];
                         uint8_t stable[2][CAMERA_APP_FRAME_MAX_BYTES];
                     } camera_frames);
-L2_NON_RET_BSS_SECT(camera_app_buffers,
-                    ALIGN(64) static uint8_t camera_preview_buffer[CAMERA_DISPLAY_BUFFER_SIZE]);
 L2_NON_RET_BSS_SECT_END
 
 #define CAMERA_APP_STILL_ARENA (camera_frames.dma[0])
@@ -123,7 +122,7 @@ static frame_pool_t camera_pool;
 static struct rt_mutex camera_pool_lock;
 static struct rt_event camera_events;
 static rt_thread_t capture_thread;
-static rt_thread_t display_thread;
+static rt_thread_t worker_thread;
 static volatile rt_bool_t camera_running;
 static uint32_t captured_frames;
 static uint32_t displayed_frames;
@@ -1285,6 +1284,16 @@ static void camera_app_print_stats(camera_stats_checkpoint_t *last)
         write_ms_x10 = camera_metrics_average_ms_x10(
             write_total - last->write_ms, frames, 1000U);
 
+#if !CAMERA_APP_USE_PREVIEW
+        /* Preview-off build: these are only used by the preview stats line. */
+        (void)frames;
+        (void)fps_x10;
+        (void)display_ms_x10;
+        (void)isp_ms_x10;
+        (void)write_ms_x10;
+#endif
+
+#if CAMERA_APP_USE_PREVIEW
         rt_kprintf("camera: captured=%u displayed=%u dropped=%u failed=%u "
                    "fps=%u.%u period=%u.%u copy=%u.%u display=%u.%u ms "
                    "isp=%u.%u write=%u.%u ms\n ",
@@ -1296,6 +1305,14 @@ static void camera_app_print_stats(camera_stats_checkpoint_t *last)
                    isp_ms_x10 / 10U, isp_ms_x10 % 10U,
                    write_ms_x10 / 10U, write_ms_x10 % 10U
                 );
+#else
+        rt_kprintf("camera: captured=%u dropped=%u failed=%u "
+                   "period=%u.%u copy=%u.%u ms preview=off\n",
+                   captured, dropped, failed,
+                   period_ms_x10 / 10U, period_ms_x10 % 10U,
+                   copy_ms_x10 / 10U, copy_ms_x10 % 10U);
+#endif
+#if CAMERA_APP_USE_PREVIEW
         if (isp_samples != last->isp_samples)
         {
             /* The ACPU stage times come from the IPC metrics and the HCPU wall
@@ -1339,6 +1356,7 @@ static void camera_app_print_stats(camera_stats_checkpoint_t *last)
             }
             rt_kprintf(" ms\n");
         }
+#endif
         *last = (camera_stats_checkpoint_t){
             .tick = now,
             .displayed = displayed,
@@ -1361,7 +1379,7 @@ static void camera_app_print_stats(camera_stats_checkpoint_t *last)
     }
 }
 
-static void camera_display_thread(void *parameter)
+static void camera_app_worker_thread(void *parameter)
 {
     camera_stats_checkpoint_t last = {.tick = rt_tick_get()};
 
@@ -1369,76 +1387,104 @@ static void camera_display_thread(void *parameter)
     while (camera_running)
     {
         rt_uint32_t events = 0;
+        camera_frame_t frame;
+        rt_bool_t have_frame = RT_FALSE;
+        rt_bool_t photo_request;
 
         rt_event_recv(&camera_events, CAMERA_APP_EVENT_FRAME,
                       RT_EVENT_FLAG_OR | RT_EVENT_FLAG_CLEAR,
                       rt_tick_from_millisecond(1000), &events);
         if ((events & CAMERA_APP_EVENT_FRAME) != 0U)
-        {
-            camera_frame_t frame;
+            have_frame = (camera_app_acquire_frame(&frame) == 0) ? RT_TRUE : RT_FALSE;
 
-            if (camera_app_acquire_frame(&frame) == 0)
+        /* The shutter is sampled once per frame/event, before anything is done
+         * with it.  A still from the sensor's own JPEG encoder does not need a
+         * preview frame: it parks the stream and captures into the preview
+         * arena itself. */
+        photo_request = (photo_pending != 0) ? RT_TRUE : RT_FALSE;
+        if (photo_request)
+            photo_pending = RT_FALSE;
+
+        if (photo_request && (camera_still_framesize != FRAMESIZE_INVALID))
+        {
+            if (have_frame)
             {
-                /* The shutter is sampled once per frame, before anything is done
-                 * with it: a capture requested while the frame was being
-                 * displayed waits for the next one. Reading the flag again after
-                 * the display would hand that request to the software encoder at
-                 * the preview resolution instead of to the sensor still below,
-                 * which is what a single press must never do. */
-                rt_bool_t photo_request = (photo_pending != 0);
+                camera_app_release_frame(&frame);
+                have_frame = RT_FALSE;
+            }
+            last_photo_error = camera_app_save_still_photo();
+        }
+#if CAMERA_APP_USE_PREVIEW
+        else if (have_frame)
+        {
+            rt_tick_t display_start;
+            uint32_t decode_ms = 0U;
+            uint32_t write_ms = 0U;
+            uint32_t isp_ms = 0U;
+            int result;
+
+            display_start = rt_tick_get();
+            (void)camera_app_apply_isp(&frame, &isp_ms);
+            result = camera_display_show(&frame, &decode_ms, &write_ms);
+            {
+                rt_tick_t elapsed = rt_tick_get() - display_start;
 
                 if (photo_request)
-                    photo_pending = RT_FALSE;
+                    last_photo_error = camera_app_save_photo(&frame);
 
-                if (photo_request && (camera_still_framesize != FRAMESIZE_INVALID))
+                rt_mutex_take(&camera_pool_lock, RT_WAITING_FOREVER);
+                display_ticks += elapsed;
+                if (result == 0)
                 {
-                    /* The still arena is the preview memory, so the frame has to
-                     * go back before the sensor is reconfigured. */
-                    camera_app_release_frame(&frame);
-                    last_photo_error = camera_app_save_still_photo();
+                    displayed_frames++;
+                    camera_window.displayed++;
+                    display_isp_ms += isp_ms;
+                    display_write_ms += write_ms;
+                    if (frame.format == CAMERA_PIXEL_JPEG)
+                    {
+                        camera_window.decode_samples++;
+                        camera_window.decode_total_ms += decode_ms;
+                        if (decode_ms > camera_window.decode_max_ms)
+                            camera_window.decode_max_ms = decode_ms;
+                    }
                 }
                 else
                 {
-                    rt_tick_t display_start;
-                    uint32_t decode_ms = 0U;
-                    uint32_t write_ms = 0U;
+                    failed_frames++;
+                    camera_window.failed++;
+                }
+                rt_mutex_release(&camera_pool_lock);
+            }
+            camera_app_release_frame(&frame);
+            have_frame = RT_FALSE;
+        }
+#else
+        else
+        {
+            /* Photo-only build: a sensor without its own JPEG encoder has to
+             * encode the frame that is already in the pool. */
+            if (photo_request)
+            {
+                if (have_frame)
+                {
                     uint32_t isp_ms = 0U;
-                    int result;
 
-                    display_start = rt_tick_get();
                     (void)camera_app_apply_isp(&frame, &isp_ms);
-                    result = camera_display_show(&frame, &decode_ms, &write_ms);
-                    rt_tick_t elapsed = rt_tick_get() - display_start;
-
-                    if (photo_request)
-                        last_photo_error = camera_app_save_photo(&frame);
-
-                    rt_mutex_take(&camera_pool_lock, RT_WAITING_FOREVER);
-                    display_ticks += elapsed;
-                    if (result == 0)
-                    {
-                        displayed_frames++;
-                        camera_window.displayed++;
-                        display_isp_ms += isp_ms;
-                        display_write_ms += write_ms;
-                        if (frame.format == CAMERA_PIXEL_JPEG)
-                        {
-                            camera_window.decode_samples++;
-                            camera_window.decode_total_ms += decode_ms;
-                            if (decode_ms > camera_window.decode_max_ms)
-                                camera_window.decode_max_ms = decode_ms;
-                        }
-                    }
-                    else
-                    {
-                        failed_frames++;
-                        camera_window.failed++;
-                    }
-                    rt_mutex_release(&camera_pool_lock);
-                    camera_app_release_frame(&frame);
+                    last_photo_error = camera_app_save_photo(&frame);
+                }
+                else
+                {
+                    rt_kprintf("camera: photo ignored, no frame available\n");
+                    last_photo_error = -1;
                 }
             }
+            if (have_frame)
+            {
+                camera_app_release_frame(&frame);
+                have_frame = RT_FALSE;
+            }
         }
+#endif
         camera_app_print_stats(&last);
     }
 }
@@ -1454,11 +1500,12 @@ static const char *camera_app_jpeg_core_name(void)
 
 static void camera_app_log_config(void)
 {
-    rt_kprintf("camera: cfg %ux%u %s isp=%s jpeg=%s stages=0x%08x\n",
+    rt_kprintf("camera: cfg %ux%u %s isp=%s jpeg=%s stages=0x%08x preview=%s\n",
                camera_frame_width, camera_frame_height,
                (camera_frame_format == CAMERA_PIXEL_JPEG) ? "jpeg" : "rgb565",
                camera_isp_mode_name(), camera_app_jpeg_core_name(),
-               (unsigned)camera_isp_flags());
+               (unsigned)camera_isp_flags(),
+               CAMERA_APP_USE_PREVIEW ? "on" : "off");
 }
 
 int camera_app_start(void)
@@ -1481,24 +1528,27 @@ int camera_app_start(void)
     rt_sem_init(&camera_still_parked, "cam_still", 0, RT_IPC_FLAG_PRIO);
     rt_sem_init(&camera_still_released, "cam_photo", 0, RT_IPC_FLAG_PRIO);
 
-    if (camera_display_open(camera_preview_buffer,
-                            sizeof(camera_preview_buffer)) != 0)
+#if CAMERA_APP_USE_PREVIEW
+    if (camera_display_open() != 0)
     {
         rt_kprintf("camera: init failed stage=display\n");
         camera_app_camera_close();
         return -1;
     }
+#endif
 
     capture_thread = rt_thread_create("cam_cap", camera_capture_thread,
                                       RT_NULL, 4096, 12, 10);
-    display_thread = rt_thread_create("cam_disp", camera_display_thread,
-                                      RT_NULL, 6144, 13, 10);
-    if ((capture_thread == RT_NULL) || (display_thread == RT_NULL))
+    worker_thread = rt_thread_create("cam_work", camera_app_worker_thread,
+                                     RT_NULL, 6144, 13, 10);
+    if ((capture_thread == RT_NULL) || (worker_thread == RT_NULL))
     {
         rt_kprintf("camera: init failed stage=threads\n");
         if (capture_thread != RT_NULL) rt_thread_delete(capture_thread);
-        if (display_thread != RT_NULL) rt_thread_delete(display_thread);
+        if (worker_thread != RT_NULL) rt_thread_delete(worker_thread);
+#if CAMERA_APP_USE_PREVIEW
         camera_display_close();
+#endif
         camera_app_camera_close();
         return -1;
     }
@@ -1507,14 +1557,16 @@ int camera_app_start(void)
     {
         rt_kprintf("camera: init failed stage=stream\n");
         rt_thread_delete(capture_thread);
-        rt_thread_delete(display_thread);
+        rt_thread_delete(worker_thread);
+#if CAMERA_APP_USE_PREVIEW
         camera_display_close();
+#endif
         camera_app_camera_close();
         return -1;
     }
 
     camera_running = RT_TRUE;
-    rt_thread_startup(display_thread);
+    rt_thread_startup(worker_thread);
     rt_thread_startup(capture_thread);
     camera_app_log_config();
     if (camera_still_framesize != FRAMESIZE_INVALID)
@@ -1531,8 +1583,13 @@ int camera_app_start(void)
     {
         rt_kprintf("camera: stills are encoded preview frames, no sensor JPEG\n");
     }
-    rt_kprintf("camera: preview started %ux%u -> 390x450\n",
+#if CAMERA_APP_USE_PREVIEW
+    /* The panel window is chosen and logged by camera_display_open(). */
+    rt_kprintf("camera: preview started %ux%u\n",
                camera_frame_width, camera_frame_height);
+#else
+    rt_kprintf("camera: preview disabled, capture/storage only\n");
+#endif
     if (photo_storage_ready() == PHOTO_STORAGE_OK)
         rt_kprintf("camera: sd card ready, photos go to /IMG_nnnn.JPG\n");
     else
@@ -1582,9 +1639,15 @@ static int camera_app_stats_cmd(int argc, char **argv)
         rt_kprintf("camera stats: acpu query failed\n");
 
     rt_kprintf("camera stats: window=%u ms\n", window_ms);
+#if CAMERA_APP_USE_PREVIEW
     rt_kprintf("camera stats: frames captured=%u displayed=%u "
                "dropped=%u failed=%u\n",
                win.captured, win.displayed, win.dropped, win.failed);
+#else
+    rt_kprintf("camera stats: frames captured=%u dropped=%u failed=%u "
+               "preview=off\n",
+               win.captured, win.dropped, win.failed);
+#endif
     if (win.decode_samples != 0U)
         rt_kprintf("camera stats: decode n=%u avg=%u ms max=%u ms\n",
                    win.decode_samples,
@@ -1673,7 +1736,7 @@ static int camera_photo_cmd(int argc, char **argv)
     (void)argv;
     if (camera_app_take_photo() != 0)
     {
-        rt_kprintf("camera: preview is not running\n");
+        rt_kprintf("camera: camera is not running\n");
         return -1;
     }
     rt_kprintf("camera: photo queued\n");

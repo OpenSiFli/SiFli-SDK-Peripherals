@@ -1,3 +1,22 @@
+#APP specific configuration.
+config CAMERA_APP_PREVIEW
+    bool "Camera preview on LCD"
+    default n
+    help
+      Enable the LCD preview path.  Disable it to keep only camera capture,
+      photo encoding and storage: the LCD is not opened and display/*.c is not
+      compiled, so the DVP pins stay free on carriers where the LCD and DCMI
+      share pins.
+
+config CAMERA_KEYS_USE_ADC_KEYS
+    bool "Camera keys come from the board ADC key ladder"
+    default n
+    help
+      Bind the camera shutter/album/next handlers to the board ADC key group.
+      Set this on carriers whose KEY1..KEY3 are resistor-ladder keys (the
+      SF32LB57-LCD DevKit); leave it off when the ADC channel is the battery
+      monitor and KEY1 is a plain GPIO.
+
 config CUSTOM_MEM_MAP
     bool
 	select custom_mem_map
