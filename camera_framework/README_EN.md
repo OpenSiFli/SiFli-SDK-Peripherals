@@ -70,81 +70,135 @@ The dependency is strictly one-way downwards: no lower layer calls back into the
 
 | OV2640 Pin | MCU Pin | Function | Notes |
 |------------|---------|----------|-------|
-| D0 ~ D7 | Muxed by the board (`bsp_pinmux.c`) | 8-bit parallel data | Owned by the SF32LB57X DCMI backend |
+| D0 ~ D7 | Muxed by the board (`bsp_pinmux.c`) | 8-bit parallel data | Owned by the SDK DCMI backend |
 | PCLK | Muxed by the board (`bsp_pinmux.c`) | Pixel clock | DCMI samples the rising PCLK edge by default |
-| HSYNC/HREF | Muxed by the board (`bsp_pinmux.c`) | Line sync | Owned by the SF32LB57X DCMI backend |
-| VSYNC | Muxed by the board (`bsp_pinmux.c`) | Frame sync | Owned by the SF32LB57X DCMI backend |
+| HSYNC/HREF | Muxed by the board (`bsp_pinmux.c`) | Line sync | Owned by the SDK DCMI backend |
+| VSYNC | Muxed by the board (`bsp_pinmux.c`) | Frame sync | Owned by the SDK DCMI backend |
 | SDA | Muxed by the board (`bsp_pinmux.c`) | SCCB data | The board owns the pad; the framework only opens `CAMERA_I2C_DEVICE_NAME` |
 | SCL | Muxed by the board (`bsp_pinmux.c`) | SCCB clock | Same as SDA |
 | XCLK | Muxed by the board (`bsp_pinmux.c`) | Sensor clock input | The board names the PWM device/channel (`CAMERA_XCLK_PWM_DEVICE_NAME` / `_CHANNEL`); a module with its own oscillator declares `CAMERA_XCLK_EXTERNAL_OSC` instead of `CAMERA_XCLK_ENABLE` |
 
 Notes:
 
-- Parallel DVP is available only on SF32LB57X and only through the SDK's `dcmi` device driver; OV2640 accesses DVP only through the bus-adapter layer
+- Parallel DVP uses the SDK's `dcmi` device driver. The component no longer filters by SoC model; the board is responsible for only enabling `BSP_USING_CAMERA1` when it actually exposes DCMI. OV2640 accesses DVP only through the bus-adapter layer
 - **Every pad is the board's.** `bsp_pinmux.c` muxes the DVP/SPI pads, the MCLK pad and the camera I2C pads; the framework calls no `HAL_PIN_*` and carries no pin or device-name option of its own — it only uses the RT-Thread device names the board declares
 - `SCCB settings` no longer exists as a menu: the bus name is the board's `CAMERA_I2C_DEVICE_NAME`, and the SCCB timeout/clock rate are constants inside each sensor driver
 
-## Kconfig Options
+## Kconfig Path
 
-All options are nested under `Camera drivers`, then configure:
+Run from the example project:
 
-- `Sensor settings` -> `Use OV2640` -> `OV2640 settings`
-- `Data bus settings`
+```sh
+scons --board=dpi-hdk_lb57eybbn6_n16_qspi --menuconfig
+```
 
-There is no `SCCB settings` menu and no pin option: see below.
+or from the repository root:
 
-### Sensor settings
+```sh
+scons -C camera_framework/examples/take_photo_to_screen/project \
+      --board=dpi-hdk_lb57eybbn6_n16_qspi --menuconfig
+```
 
-| Option | Default | Range | Description |
-|--------|---------|-------|-------------|
-| `SENSOR_USING_OV2640` / `_GC032A` / `_BF30A2` | OV2640 | — | The one sensor driver compiled into this firmware |
+The menu exists only after the component Kconfig is sourced. In-repo examples do
+that with `rsource "../../../Kconfig"` in `project/Kconfig.proj`; with SF-PKG,
+`sf-pkgs/Kconfig.conandeps` sources it instead, under the same
+`Camera drivers` menu.
 
-> The frame-wait timeout is **not** a menu option: each driver carries its own
-> constant (`OV2640_FRAME_TIMEOUT_MS`, `GC032A_FRAME_TIMEOUT_MS`,
-> `BF30A2_FRAME_TIMEOUT_MS`, `ARDUCAM_FIFO_FRAME_WAIT_MS`).
+If `Camera drivers` is missing, check that:
 
-### SCCB settings
+- the board has `BSP_USING_CAMERA1=y` (otherwise `sf-pkg.yaml` does not pull the
+  component);
+- the component is installed (`sf-pkgs/Kconfig.conandeps` exists) or the in-repo
+  example still has `rsource "../../../Kconfig"` in `project/Kconfig.proj`;
+- `PKG_USING_CAMERA_FRAMEWORK=y` (when it is off, all submenus are hidden).
 
-There is no `SCCB settings` menu. The camera I2C bus and its pads are board
-facts: the board names the bus as `CAMERA_I2C_DEVICE_NAME` and muxes SCL/SDA in
-its own `bsp_pinmux.c`. Bus timing is driver-owned
-(`OV2640_SCCB_TIMEOUT_MS` / `_MAX_HZ`, `GC032A_SCCB_TIMEOUT_MS` / `_MAX_HZ`).
+Menu path:
 
-### Data bus settings
+```text
+Camera drivers (PKG_USING_CAMERA_FRAMEWORK)
+├── Camera selection
+│   ├── Camera model               OV2640 / GC032A / BF30A2 (single choice)
+│   └── <model> interface          only the links that model supports
+├── Camera hardware
+│   ├── I2C device name            CAMERA_I2C_DEVICE_NAME
+│   ├── Camera XCLK (MCLK) output  CAMERA_XCLK_ENABLE
+│   └── XCLK PWM device name / channel
+├── Camera software ISP
+│   ├── ISP pipeline               Sensor hardware ISP only / Software ISP
+│   └── Camera software ISP execution core
+└── Camera software JPEG
+    ├── BitBank JPEGENC encoder
+    ├── ChaN TJpgDec decoder
+    └── Camera software JPEG execution core
+```
 
-The menu follows the compiled-in sensor — it offers the transport, and the
-options change with the camera:
+Configuration files:
 
-| Sensor | Menu offers |
-|--------|-------------|
-| OV2640 | `8-bit DVP (parallel)` or `SPI (ArduCam FIFO module)` |
-| GC032A | `8-bit DVP (parallel)` or `2-bit SPI (serial)` |
-| BF30A2 | `SPI1` / `SPI2` (its stream is always SPI) |
-| OV2640 + ArduCam FIFO | additionally `SPI1` / `SPI2` for the module |
+| Path | Purpose |
+|------|---------|
+| `camera_framework/Kconfig` | root switch `PKG_USING_CAMERA_FRAMEWORK`, model/interface choices, `Camera hardware`, derived backend symbols |
+| `camera_framework/software/isp/Kconfig` | `Camera software ISP` |
+| `camera_framework/software/jpeg/Kconfig` | `Camera software JPEG` |
+| `customer/boards/<board>/Kconfig.board` | default-only stubs for `choice SENSOR_MODEL` / `choice CAMERA_<MODEL>_INTERFACE`; hardware defaults via `configdefault CAMERA_I2C_DEVICE_NAME` / `CAMERA_XCLK_*` |
+| `project/Kconfig.proj` | in-repo examples source the framework with `rsource "../../../Kconfig"`; with SF-PKG the component is sourced by `sf-pkgs/Kconfig.conandeps` instead |
+| `project/proj.conf` | project overrides; in the examples, menuconfig saves here |
+| `build_<board>_<core>/.config`, `rtconfig.h` | generated final configuration and macros; do not edit by hand |
 
-| Option | Description |
-|--------|-------------|
-| `CAMERA_OV2640_INTERFACE_DVP` / `_ARDUCAM_FIFO` | 8-wire parallel bus, or SPI through an ArduCam FIFO module (a bare OV2640 has no serial pixel output) |
-| `CAMERA_GC032A_INTERFACE_DVP_8BIT` / `_SERIAL_2BIT` | 8-wire parallel bus, or GC032A's own 2-bit serial format into the DCMI SPI packet mode |
-| `CAMERA_ARDUCAM_SPI_BUS1/2` | which SPI instance the ArduCam module is read through (auto-selects that SPI driver + DMA) |
-| `CAMERA_BF30A2_SPI_BUS1/2` | which SPI instance BF30A2 streams on (auto-selects circular DMA) |
-| `CAMERA_DVP_BACKEND_DCMI` | hidden: the only parallel-DVP backend (SDK `dcmi` device driver) |
-| `CAMERA_SERIAL_SPI_2BIT` | hidden: 2-bit serial capture through the same DCMI in SPI packet mode |
+Precedence, lowest to highest:
 
-> Pads are never a menu option: pin muxing, pulls and drive strength come from the
-> board (`customer/boards/<board>/bsp_pinmux.c`), device labels and bus timing
-> come from the driver/backend code. Board symbols the framework consumes:
-> `CAMERA_I2C_DEVICE_NAME`, `CAMERA_XCLK_ENABLE`, `CAMERA_XCLK_PWM_DEVICE_NAME` /
-> `_CHANNEL`, `CAMERA_XCLK_EXTERNAL_OSC`, `CAMERA_DCMI_PCLK_FALLING`,
-> `CAMERA_BF30A2_RESET_PIN`.
->
-> The dependency runs board -> framework only: the board declares what it wires
-> (optionally grouped under its own `BOARD_CAMERA_HW`), the framework reads those
-> symbols and decides whether the compiled-in sensor needs them — a sensor that
-> needs MCLK with no board declaration is a build error, not a silent no-op. No
-> board Kconfig may reference `CAMERA_FRAMEWORK_*` / `CAMERA_USING_*`. See
-> `develop.md` section 4.1, section 4.3 (a complete `Kconfig.board` example) and
-> Appendix A for the full contract.
+```text
+board Kconfig.board configdefault
+    → project proj.conf / menuconfig selection
+        → generated .config / rtconfig.h
+```
+
+- The board only supplies defaults; the component choices pick the final model and
+  interface.
+- After changing a board default, remove any explicit `CONFIG_SENSOR_USING_*` /
+  `CONFIG_CAMERA_<MODEL>_INTERFACE_*` from `proj.conf` or re-select it in
+  menuconfig, otherwise the old value wins.
+- bootloader/ACPU passes do not source the component, so
+  `PKG_USING_CAMERA_FRAMEWORK` is undefined, the default-only choice stub is inert
+  and every board `configdefault` stays inactive. This avoids `defined without a
+  prompt`, `default not contained in the choice` and `active but symbol undefined`
+  warnings.
+
+### Sensor and interface defaults
+
+- `SENSOR_USING_OV2640` / `_GC032A` / `_BF30A2` are members of the single-choice
+  `SENSOR_MODEL`, whose full definition is in the component. The board only reopens
+  the same named choice to set its default:
+
+  ```kconfig
+  choice SENSOR_MODEL
+      default SENSOR_USING_OV2640
+  endchoice
+  ```
+
+  In a component-less bootloader/ACPU pass this default-only stub has an inactive
+  dependency and the SDK's `check_undefined_configdefaults()` treats it as inert.
+  Do not use `configdefault` on a choice member itself.
+- Each model has its own interface choice. The board only needs one default-only
+  stub for its **default model** (OV2640 here):
+
+  ```kconfig
+  choice CAMERA_OV2640_INTERFACE
+      default CAMERA_OV2640_INTERFACE_DVP
+  endchoice
+  ```
+
+  The component owns the full choice and keeps fallback defaults for other models
+  (OV2640/GC032A → DVP, BF30A2 → SPI1). Add another model's stub only if that
+  model needs a non-default interface.
+- `CAMERA_USING_*` and `CAMERA_*_BACKEND_*` / `CAMERA_SERIAL_SPI_2BIT` are derived
+  symbols selected by the interface choice; do not edit them from a board or a
+  `.conf` fragment.
+- `BSP_USING_CAMERA1` is the board's Camera 1 connector switch and only controls
+  whether the SF-PKG dependency is pulled in.
+
+The complete board contract (symbol list, optional `BOARD_CAMERA_HW` grouping,
+derived `CAMERA_BOARD_HAS_MCLK` / `CAMERA_XCLK_REQUIRED`, verification greps) is in
+`develop.md` sections 4.1, 4.3 and Appendix A.
 
 ## Usage
 
@@ -350,9 +404,9 @@ python jlinkbin2bmp.py "-if SWD -speed 12000" rgb565 320 240 0x20100000
 - Chinese version: [README.md](README.md)
 - take_photo example: [examples/take_photo/README_EN.md](examples/take_photo/README_EN.md)
 
-## SF32LB57 hardware DCMI backend
+## Hardware DCMI backend
 
-Select GC032A `8-bit DVP` or OV2640 `DVP` (both selectable on SF32LB57X only). Parallel DVP has a single backend — `CAMERA_DVP_BACKEND_DCMI` is a hidden symbol that defaults to `y` and automatically `select`s `BSP_USING_DCMI`, which must stay enabled. This backend uses the SDK's `dcmi` device driver: the SDK owns the peripheral, the DMA channel and the DCMI interrupt vectors, while the framework programs capture and completes JPEG frames. DMA half/full/error notifications arrive through `rt_device_set_rx_indicate`; the SDK's own `HAL_DCMI_FrameEventCallback` turns DCMI frame/overflow/packet-size events into the same notification, and the framework only overrides `HAL_DCMI_ErrorCallback`. The board's own `bsp_pinmux.c` muxes D0-D7, PCLK, HREF, VSYNC and the MCLK pad in its `BSP_USING_DCMI` block, so the application supplies no `HAL_DCMI_MspInit()`; the board's `BSP_CAMERA_PowerUp()` / `BSP_CAMERA_PowerDown()` hooks are called by the backend init/deinit. SCCB uses the board's `CAMERA_I2C_DEVICE_NAME` plus the driver's timing constants, and capture samples the rising PCLK edge by default (the board can select the falling edge with `CAMERA_DCMI_PCLK_FALLING`). On 52x/56x there is no parallel DVP capture path at all: use GC032A `2-bit SPI` or OV2640 `Arducam SPI FIFO` instead.
+Select GC032A `8-bit DVP` or OV2640 `DVP`. The component does not filter by SoC model: the board only enables `BSP_USING_CAMERA1` when it actually exposes DCMI. Parallel DVP has a single backend — `CAMERA_DVP_BACKEND_DCMI` is a hidden symbol that defaults to `y` and automatically `select`s `BSP_USING_DCMI`, which must stay enabled. This backend uses the SDK's `dcmi` device driver: the SDK owns the peripheral, the DMA channel and the DCMI interrupt vectors, while the framework programs capture and completes JPEG frames. DMA half/full/error notifications arrive through `rt_device_set_rx_indicate`; the SDK's own `HAL_DCMI_FrameEventCallback` turns DCMI frame/overflow/packet-size events into the same notification, and the framework only overrides `HAL_DCMI_ErrorCallback`. The board's own `bsp_pinmux.c` muxes D0-D7, PCLK, HREF, VSYNC and the MCLK pad in its `BSP_USING_DCMI` block, so the application supplies no `HAL_DCMI_MspInit()`; the board's `BSP_CAMERA_PowerUp()` / `BSP_CAMERA_PowerDown()` hooks are called by the backend init/deinit. SCCB uses the board's `CAMERA_I2C_DEVICE_NAME` plus the driver's timing constants, and capture samples the rising PCLK edge by default (the board can select the falling edge with `CAMERA_DCMI_PCLK_FALLING`). Do not enable `BSP_USING_CAMERA1` on a board without DCMI.
 
 OV2640 defaults to SVGA/RGB565 with hardware DCMI and supports native sensor JPEG capture. The ArduCAM FIFO backend retains its JPEG default. The OV2640 RGB565 settings write `0x09` to the DSP `IMAGE_MODE` register, sending the low byte of each pixel first. Applications using native RGB565 on a little-endian MCU can copy these pixels directly.
 

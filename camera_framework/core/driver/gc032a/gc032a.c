@@ -12,7 +12,7 @@
 #include "../camera_sensor_runtime.h"
 #include "camera_xclk.h"
 #include "gc032a_regs.h"
-#if defined(CAMERA_GC032A_INTERFACE_SERIAL_2BIT)
+#if defined(CAMERA_SERIAL_SPI_2BIT)
 #include "gc032a_serial_settings.h"
 #else
 #include "gc032a_dvp_settings.h"
@@ -33,7 +33,7 @@
 /* GC032A has no oscillator: the missing-MCLK case is a build error raised by
  * camera_xclk.c (CAMERA_XCLK_REQUIRED / CAMERA_XCLK_ENABLE). */
 
-#if defined(CAMERA_GC032A_INTERFACE_SERIAL_2BIT)
+#if defined(CAMERA_SERIAL_SPI_2BIT)
 /* One VGA line of RGB565 payload. The DCMI packet mode uses it to tell a
  * complete packet from a truncated one, and the marker bytes come from the
  * sensor's serial packet format: frame start 0xca, frame end 0xb6, line start
@@ -67,14 +67,14 @@ static gc032a_device_t s_device;
 static const pixformat_t s_pixformats[] =
 {
     PIXFORMAT_RGB565,
-#if !defined(CAMERA_GC032A_INTERFACE_SERIAL_2BIT)
+#if !defined(CAMERA_SERIAL_SPI_2BIT)
     PIXFORMAT_YUV422,
 #endif
 };
 
 static const framesize_t s_framesizes[] =
 {
-#if defined(CAMERA_GC032A_INTERFACE_SERIAL_2BIT)
+#if defined(CAMERA_SERIAL_SPI_2BIT)
     FRAMESIZE_VGA,
 #else
     FRAMESIZE_96X96,
@@ -103,7 +103,7 @@ static const camera_capabilities_t s_capabilities =
 static const camera_capture_config_t s_default_config =
 {
     .pixformat = PIXFORMAT_RGB565,
-#if defined(CAMERA_GC032A_INTERFACE_SERIAL_2BIT)
+#if defined(CAMERA_SERIAL_SPI_2BIT)
     .framesize = FRAMESIZE_VGA,
 #else
     .framesize = FRAMESIZE_QVGA,
@@ -122,7 +122,7 @@ static const gc032a_hw_config_t s_hw_config =
     .runtime =
     {
         .adapter_name = CAMERA_DATA_BUS_ADAPTER_NAME,
-#if defined(CAMERA_GC032A_INTERFACE_SERIAL_2BIT)
+#if defined(CAMERA_SERIAL_SPI_2BIT)
         .adapter_type = BUS_TYPE_SPI,
         .serial = &s_serial_2bit,
 #else
@@ -131,12 +131,7 @@ static const gc032a_hw_config_t s_hw_config =
         .frame_timeout_ms = GC032A_FRAME_TIMEOUT_MS,
         .default_config = &s_default_config,
     },
-#if defined(CAMERA_GC032A_INTERFACE_SERIAL_2BIT) && \
-    !defined(CAMERA_SERIAL_SPI_2BIT)
-    .xclk_frequency_hz = 6000000U,
-#else
     .xclk_frequency_hz = 24000000U,
-#endif
 };
 
 static int gc032a_open(void);
@@ -241,7 +236,7 @@ static int gc032a_check_id(void)
 
 static int gc032a_apply_pixformat(pixformat_t pixformat)
 {
-#if defined(CAMERA_GC032A_INTERFACE_SERIAL_2BIT)
+#if defined(CAMERA_SERIAL_SPI_2BIT)
     if (pixformat != PIXFORMAT_RGB565)
     {
         return -RT_EINVAL;
@@ -274,7 +269,7 @@ static int gc032a_apply_pixformat(pixformat_t pixformat)
 
 static int gc032a_apply_framesize(framesize_t framesize)
 {
-#if defined(CAMERA_GC032A_INTERFACE_SERIAL_2BIT)
+#if defined(CAMERA_SERIAL_SPI_2BIT)
     return framesize == FRAMESIZE_VGA ? RT_EOK : -RT_EINVAL;
 #else
     uint8_t regs[13][2];
@@ -346,7 +341,7 @@ static int gc032a_sensor_init(void)
     }
     rt_thread_mdelay(100);
 
-#if defined(CAMERA_GC032A_INTERFACE_SERIAL_2BIT)
+#if defined(CAMERA_SERIAL_SPI_2BIT)
     ret = gc032a_write_table(gc032a_serial_default_regs,
                              sizeof(gc032a_serial_default_regs) /
                              sizeof(gc032a_serial_default_regs[0]));

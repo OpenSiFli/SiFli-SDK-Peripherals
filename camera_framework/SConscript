@@ -10,6 +10,14 @@ import os
 
 # keep current working dir
 cwd = GetCurrentDir()
+
+# The component Kconfig may be sourced by a project that keeps the package
+# disabled (for example a camera-less build); in that case there is nothing to
+# compile and no model/interface to validate.
+if not GetDepend('PKG_USING_CAMERA_FRAMEWORK'):
+    group = []
+    Return('group')
+
 # Collect common framework sources, one data backend and one sensor.
 src = (Glob('./core/*.c') +
        Glob('./core/bus/control/*.c') +
@@ -40,27 +48,44 @@ elif GetDepend('SENSOR_USING_BF30A2'):
     src += Glob('./core/driver/bf30a2/*.c')
     include += ['./core/driver/bf30a2']
 
-sensor_selected = (
-    GetDepend('SENSOR_USING_OV2640') or
-    GetDepend('SENSOR_USING_GC032A') or
-    GetDepend('SENSOR_USING_BF30A2')
-)
-if not sensor_selected:
+model_options = [
+    name for name in (
+        'SENSOR_USING_OV2640', 'SENSOR_USING_GC032A', 'SENSOR_USING_BF30A2')
+    if GetDepend(name)
+]
+if len(model_options) != 1:
     raise Exception(
-        "CAMERA_MODEL is empty or unknown: no sensor driver was selected. "
-        "Check the model mapping in camera_framework/Kconfig."
+        "Select exactly one camera sensor (SENSOR_USING_OV2640 / "
+        "SENSOR_USING_GC032A / SENSOR_USING_BF30A2); selected: " +
+        (", ".join(model_options) if model_options else "none")
+    )
+
+interface_options = [
+    name for name in (
+        'CAMERA_OV2640_INTERFACE_DVP',
+        'CAMERA_OV2640_INTERFACE_SPI1', 'CAMERA_OV2640_INTERFACE_SPI2',
+        'CAMERA_GC032A_INTERFACE_DVP', 'CAMERA_GC032A_INTERFACE_SERIAL2BIT',
+        'CAMERA_BF30A2_INTERFACE_SPI1', 'CAMERA_BF30A2_INTERFACE_SPI2')
+    if GetDepend(name)
+]
+if len(interface_options) != 1:
+    raise Exception(
+        "Select exactly one camera interface for " + model_options[0] +
+        "; selected: " +
+        (", ".join(interface_options) if interface_options else "none")
     )
 
 if not GetDepend('CAMERA_CONFIG_VALID'):
     raise Exception(
-        "Unsupported CAMERA_MODEL/CAMERA_INTERFACE combination: no backend "
-        "was selected. Check the model+interface mapping in "
+        "Unsupported camera model/interface combination: " +
+        ", ".join(model_options) + " + " + ", ".join(interface_options) +
+        " selects no backend. Check the model+interface mapping in "
         "camera_framework/Kconfig."
     )
 
-# PKG_USING_CAMERA_FRAMEWORK is the package enable symbol. The model/interface
-# strings are defined by the SDK camera module Kconfig; this package Kconfig
-# maps them to the SENSOR_USING_* / CAMERA_* selectors used above.
+# PKG_USING_CAMERA_FRAMEWORK is the package enable symbol. The component
+# Kconfig maps SENSOR_USING_* / CAMERA_INTERFACE_* options to the
+# backend and SPI selectors used above.
 group = DefineGroup('Drivers', src, depend = ['PKG_USING_CAMERA_FRAMEWORK'], CPPPATH = include, LIBPATH = include)
 group.extend(SConscript(os.path.join(cwd, 'software/SConscript'),
                         variant_dir='software', duplicate=0))

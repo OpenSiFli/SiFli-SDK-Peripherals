@@ -43,35 +43,45 @@ scons -C camera_framework/examples/take_photo_to_screen/project \
 
 构建成功只说明固件能生成，采集、显示和写卡闭环仍需实板验收。
 
-> **SDK 侧必须带 external `camera_framework` 的 Kconfig 适配**（SDK commit
-> `004b1dab3`，`Adapt Kconfig to external camera_framework`）。型号和通信形式菜单由
-> SDK 的 `customer/peripherals/camera/Kconfig` 提供，位置是
-> `Board Peripherals -> Camera 1 -> Camera model / Camera interface`；本组件的
-> `Kconfig` 只把它们映射到传感器、总线和 backend。
+> 型号和通信形式菜单由本组件的 `Kconfig` 提供，位置是
+> `Camera drivers -> Camera selection`。`BSP_USING_CAMERA1` 声明在 57x 板级
+> `Kconfig.board`，用来让 `customer/peripherals/camera/sf-pkg.yaml` 决定是否拉取本组件；
+> 组件没被拉取时，板级的 `choice SENSOR_MODEL default ... endchoice` stub 和
+> `configdefault CAMERA_XCLK_*` 都不会生效，也不会因为符号未定义而报错（它们被
+> `PKG_USING_CAMERA_FRAMEWORK` 条件包住）。
 >
 > 如果 menuconfig 里只有旧的 `Camera -> OV2640 / GC032A / SPI Camera` 勾选项，说明
-> 当前 SDK 分支还没带这个适配：`BSP_USING_OV2640` / `BSP_USING_GC032A` 只会编译 SDK
-> 自带的驱动，不会产生框架需要的 `CAMERA_MODEL`，构建会报
-> `CAMERA_MODEL is empty or unknown: no sensor driver was selected`。此时要先合并
-> SDK 侧适配，单靠 `proj.conf` 里加 `CONFIG_BSP_USING_OV2640=y` 解决不了。
+> 当前 SDK 分支还是旧相机菜单；需要切到带 external `camera_framework` 适配的 SDK
+> 分支（如 `004b1dab3` 之后）。
 
 ## 配置
 
-`project/proj.conf` 固定开发板相关的项和本示例的默认型号：
+`project/proj.conf` 只固定开发板相关的项；相机型号/接口由板级 `configdefault` 给默认值。
 
-```conf
-CONFIG_BSP_USING_CAMERA1=y
-CONFIG_CAMERA_MODEL="ov2640"
-CONFIG_CAMERA_INTERFACE="dvp"
+在工程目录执行 menuconfig：
+
+```sh
+scons --board=dpi-hdk_lb57eybbn6_n16_qspi --menuconfig
 ```
 
+菜单路径是顶层 `Camera drivers -> Camera selection / Camera hardware / Camera software
+ISP / Camera software JPEG`；型号和接口都是单选 choice。
+
 - `Camera model` / `Camera interface` 对应 menuconfig 的
-  `Board Peripherals -> Camera 1`，可选 `ov2640` / `gc032a` / `bf30a2` 和
-  `dvp` / `serial2bit` / `spi1` / `spi2`；本示例默认 OV2640 + 8-bit DVP。
+  `Camera drivers -> Camera selection`：型号是 choice，只能选一个；接口也是 choice，
+  并且**按型号各有一个**，选中型号后只出现该型号支持的驱动方式：
+  - OV2640：`CAMERA_OV2640_INTERFACE_DVP` / `_SPI1` / `_SPI2`（ArduCam）
+  - GC032A：`CAMERA_GC032A_INTERFACE_DVP` / `_SERIAL2BIT`
+  - BF30A2：`CAMERA_BF30A2_INTERFACE_SPI1` / `_SPI2`
+
+  板级用 default-only 的 `choice SENSOR_MODEL default SENSOR_USING_OV2640 endchoice`
+  指定型号默认值，用 `choice CAMERA_<MODEL>_INTERFACE default ... endchoice` 指定接口
+  默认值；本板默认 OV2640 + 8-bit DVP。板级给的接口若该型号不支持，会自动退回该型号
+  的默认接口。
 - `Camera software ISP` / `Camera software JPEG`：是否使用软件 ISP / 编解码，以及
   各自运行在 HCPU 还是 ACPU（本机默认 JPEG 跑 ACPU）。
-- `BSP_USING_CAMERA1` 只表示 Camera 1 座子有相机；具体的驱动和 backend 由
-  `camera_framework` 按型号/接口映射，不再使用 SDK 自带的 GC032A 驱动。
+- `BSP_USING_CAMERA1` 只表示 Camera 1 座子有相机（57x 板级开关），它决定是否拉取
+  `camera_framework` 组件；具体的驱动和 backend 由组件按型号/接口映射。
 - DVP pinmap 和 MCLK 是**板级硬件**：新版 SDK 的 `BOARD_DVP_PINMAP_*` 没有
   prompt，不能在 `proj.conf` 里覆盖；当前 `dpi-hdk` 板默认 `BOARD_DVP_PINMAP_0`。
   如果载板把 DVP_VSYNC 接到 PA26，需要在板级 `Kconfig.board` 改默认值。引脚复用

@@ -18,6 +18,7 @@ PYTHONPATH=<SDK>/tools/build python camera_examples_capability_test.py
 PYTHONPATH=<SDK>/tools/build python bf30a2_driver_review_test.py
 PYTHONPATH=<SDK>/tools/build python gc032a_settings_test.py
 PYTHONPATH=<SDK>/tools/build python camera_kconfig_test.py   # needs an SDK tree, see below
+PYTHONPATH=<SDK>/tools/kconfig python kconfig_configdefault_test.py
 ```
 
 | Script | What it locks down |
@@ -26,6 +27,7 @@ PYTHONPATH=<SDK>/tools/build python camera_kconfig_test.py   # needs an SDK tree
 | `camera_examples_capability_test.py` | each example advertises a configuration its Kconfig/`proj.conf` can actually produce |
 | `bf30a2_driver_review_test.py`, `gc032a_settings_test.py` | driver register-table / settings sanity |
 | `camera_kconfig_test.py` | menu structure per sensor/interface, derived symbols, board-symbol direction. It loads the framework Kconfig through a small SoC stub; without that stub it prints `SKIP` and exits 0, so the Kconfig menu is best re-verified by a real `scons --board=...` build |
+| `kconfig_configdefault_test.py` | board model/interface default stubs and component-owned choices stay compatible with the patched SDK kconfiglib: the board writes default-only `choice` stubs, the component owns the full model/interface choices, menuconfig choices win over board defaults, and a component-less pass treats the empty stubs as inert (no warnings) |
 | `camera_sdcard_example_test.py` | the SD-card example keeps a single synchronous `take_photo` command (currently expects an RGB565 sensor in its `proj.conf`) |
 
 ## On-target Suite (`tests/handle`)

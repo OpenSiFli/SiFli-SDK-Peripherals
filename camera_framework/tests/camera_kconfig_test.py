@@ -56,7 +56,7 @@ def test_gc032a_dvp_selects_dvp():
 def test_gc032a_serial_selects_only_serial():
     config = load_config(
         "SENSOR_USING_GC032A",
-        "CAMERA_GC032A_INTERFACE_SERIAL_2BIT",
+        "CAMERA_GC032A_INTERFACE_SERIAL2BIT",
     )
     expect_value(config, "CAMERA_USING_DVP", "n")
     expect_value(config, "CAMERA_USING_SERIAL", "y")
@@ -124,8 +124,8 @@ def test_communication_form_follows_the_sensor():
         raise AssertionError("inactive sensor's communication form must stay hidden")
     expect_value(ov2640, "CAMERA_OV2640_INTERFACE_ARDUCAM_FIFO", "n")
 
-    gc032a = load_config("SENSOR_USING_GC032A", "CAMERA_GC032A_INTERFACE_SERIAL_2BIT")
-    if gc032a.syms["CAMERA_GC032A_INTERFACE_SERIAL_2BIT"].choice is None:
+    gc032a = load_config("SENSOR_USING_GC032A", "CAMERA_GC032A_INTERFACE_SERIAL2BIT")
+    if gc032a.syms["CAMERA_GC032A_INTERFACE_SERIAL2BIT"].choice is None:
         raise AssertionError("GC032A communication form is not a choice")
     if gc032a.syms["CAMERA_OV2640_INTERFACE_DVP"].visibility != 0:
         raise AssertionError("inactive sensor's communication form must stay hidden")

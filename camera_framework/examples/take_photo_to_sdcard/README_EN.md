@@ -18,10 +18,10 @@ msh> take_photo_async <framesize> <quality>
 ## Select a Sensor
 
 Select a sensor under
-`Camera drivers -> Sensor settings -> Active camera sensor` in menuconfig.
-After selecting GC032A, choose either `8-bit DVP` (SF32LB57X only; 52x/56x has
-no parallel DVP capture path) or `2-bit SPI`. Only the selected sensor and data
-backend are compiled.
+`Camera drivers -> Camera selection -> Camera model` in menuconfig.
+After selecting GC032A, choose either `8-bit DVP` or `2-bit SPI`. Only the selected
+sensor and data backend are compiled. Whether DCMI exists is a board property: do
+not enable `BSP_USING_CAMERA1` on a board without DCMI.
 BF30A2 uses a fixed RGB565/240x320 mode.
 
 - `take_photo` queries the selected sensor capabilities. It saves `.jpg` when
