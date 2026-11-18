@@ -1,14 +1,23 @@
 import os
 from building import *
 
+cwd = GetCurrentDir()
+
 Import('SIFLI_SDK', 'CAMERA_SOFTWARE_ROOT')
 Import('CAMERA_SW_ISP_RUN_ON_HCPU', 'CAMERA_SW_ISP_RUN_ON_ACPU',
        'CAMERA_SW_JPEG_RUN_ON_HCPU', 'CAMERA_SW_JPEG_RUN_ON_ACPU')
 
-CAMERA_FRAMEWORK_ROOT = os.path.normpath(os.path.join(GetCurrentDir(), '../../..'))
+# This example lives inside the camera_framework component, so the framework
+# source tree is reused from the checkout instead of being pulled in as an
+# sf-pkg component; project/SConscript adds it to the build.
+CAMERA_FRAMEWORK_ROOT = os.path.normpath(os.path.join(cwd, '../../..'))
+CAMERA_ISP_ROOT = os.path.join(CAMERA_FRAMEWORK_ROOT, 'software/isp')
+CAMERA_JPEG_ROOT = os.path.join(CAMERA_FRAMEWORK_ROOT, 'software/jpeg')
 
 # Add source code
-display_src = Glob('display/*.c')
+# The display path is optional: a camera-only validation build drops it so the
+# LCD is not opened and the DVP pins stay free on carriers where they overlap.
+display_src = Glob('display/*.c') if GetDepend('CAMERA_APP_PREVIEW') else []
 app_src = Glob('app/*.c', exclude=[
     'app/camera_isp_compare.c',
     'app/camera_isp_config.c',
@@ -36,9 +45,12 @@ if CAMERA_SW_ISP_RUN_ON_ACPU or CAMERA_SW_JPEG_RUN_ON_ACPU:
         variant_dir='camera_sw_acpu_hcpu', duplicate=0)
 acpu_ctrl_dir = os.path.join(SIFLI_SDK, 'middleware/acpu_ctrl')
 acpu_client_dir = os.path.join(CAMERA_SOFTWARE_ROOT, 'example/acpu/include')
-isp_include_dir = os.path.join(CAMERA_FRAMEWORK_ROOT, 'software/isp/include')
-jpeg_include_dir = os.path.join(CAMERA_FRAMEWORK_ROOT, 'software/jpeg/include')
-group = DefineGroup('Applications', src, depend = [''],
+# The framework's own headers are addressed through this checkout, so the
+# example keeps working even when the software ISP/JPEG groups are disabled
+# (camera_isp_flags.c always includes camera_sw_isp_pipeline.h).
+isp_include_dir = os.path.join(CAMERA_ISP_ROOT, 'include')
+jpeg_include_dir = os.path.join(CAMERA_JPEG_ROOT, 'include')
+group = DefineGroup('Camera Application', src, depend = [''],
                     CPPPATH=[acpu_ctrl_dir, acpu_client_dir, isp_include_dir,
                              jpeg_include_dir])
 

@@ -1,4 +1,4 @@
-﻿/* SPDX-License-Identifier: Apache-2.0 */
+/* SPDX-License-Identifier: Apache-2.0 */
 #include "data_bus_adapter.h"
 #include "camera_jpeg_assembler.h"
 
@@ -15,10 +15,6 @@
 #define DBG_TAG "camera.dcmi"
 #define DBG_LVL DBG_INFO
 #include <rtdbg.h>
-
-#if !defined(SF32LB57X)
-#error "The hardware DCMI camera backend requires SF32LB57X"
-#endif
 
 #if !defined(BSP_USING_DCMI)
 #error "The camera DCMI backend requires the SDK DCMI driver: enable BSP_USING_DCMI"

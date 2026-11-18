@@ -1,84 +1,136 @@
 menuconfig PKG_USING_CAMERA_FRAMEWORK
     bool "Camera drivers"
-    default n
+    default y if BSP_USING_CAMERA1
     select RT_USING_SYSTEM_WORKQUEUE
     help
       Enable the camera framework package, including the handle layer, the
-      sensor drivers and the data-bus backends.
+      sensor drivers, the data-bus backends and the camera hardware settings.
 
-      The SDK only exposes CAMERA_MODEL / CAMERA_INTERFACE strings. This
-      package owns the mapping from those strings to drivers, SPI bus names,
-      backends and internal symbols.
+      The package owns the camera model/interface menu. The SDK only keeps
+      BSP_USING_CAMERA1 to decide whether the component is pulled in, and the
+      board supplies its defaults through configdefault in Kconfig.board.
 
 if PKG_USING_CAMERA_FRAMEWORK
 
-    # ---- model name -> driver selector ---------------------------------
-    config SENSOR_USING_OV2640
-        bool
-        default y if CAMERA_MODEL = "ov2640"
+    # ---- board-provided defaults ---------------------------------------
+    # The board only reopens the named choices to set their defaults (empty
+    # "choice ... default ... endchoice" stubs under BSP_USING_CAMERA1). The
+    # complete choices with prompts and members are defined below; when the
+    # component is not sourced, the empty board stubs are inert.
+    # ---- camera selection (owned by the component) ---------------------
+    # The model is a radio choice, so exactly one sensor is selected. The
+    # interface is also a per-model radio choice: each model only exposes the
+    # links it really supports, and unsupported links never appear in the menu.
+    menu "Camera selection"
 
-    config SENSOR_USING_GC032A
-        bool
-        default y if CAMERA_MODEL = "gc032a"
+        choice SENSOR_MODEL
+            prompt "Camera model"
+            default SENSOR_USING_OV2640
 
-    config SENSOR_USING_BF30A2
-        bool
-        default y if CAMERA_MODEL = "bf30a2"
+            config SENSOR_USING_OV2640
+                bool "OV2640"
+                help
+                  2 MP sensor. Supported links: 8-bit DVP, or SPI through an
+                  ArduCam FIFO module (SPI1/SPI2).
 
-    # ---- model + interface -> backend selector -------------------------
-    # Interface names are not free-standing: each one is only valid for the
-    # models that really support that wiring. This prevents combinations like
-    # GC032A + spi1 or OV2640 + serial2bit from generating a half-configured
-    # backend.
+            config SENSOR_USING_GC032A
+                bool "GC032A"
+                help
+                  VGA sensor. Supported links: 8-bit DVP, or 2-bit serial
+                  (DCMI SPI packet mode).
+
+            config SENSOR_USING_BF30A2
+                bool "BF30A2"
+                help
+                  Fixed RGB565 240x320 sensor streaming over SPI1 or SPI2.
+
+        endchoice
+
+        choice CAMERA_OV2640_INTERFACE
+            prompt "OV2640 interface"
+            depends on SENSOR_USING_OV2640
+            default CAMERA_OV2640_INTERFACE_DVP
+
+            config CAMERA_OV2640_INTERFACE_DVP
+                bool "8-bit DVP (parallel)"
+                select CAMERA_USING_DVP
+                select CAMERA_DVP_BACKEND_DCMI
+
+            config CAMERA_OV2640_INTERFACE_SPI1
+                bool "SPI1 (ArduCam FIFO)"
+                select CAMERA_USING_SPI_MODULE
+                select CAMERA_USING_ARDUCAM_FIFO
+
+            config CAMERA_OV2640_INTERFACE_SPI2
+                bool "SPI2 (ArduCam FIFO)"
+                select CAMERA_USING_SPI_MODULE
+                select CAMERA_USING_ARDUCAM_FIFO
+
+        endchoice
+
+        choice CAMERA_GC032A_INTERFACE
+            prompt "GC032A interface"
+            depends on SENSOR_USING_GC032A
+            default CAMERA_GC032A_INTERFACE_DVP
+
+            config CAMERA_GC032A_INTERFACE_DVP
+                bool "8-bit DVP (parallel)"
+                select CAMERA_USING_DVP
+                select CAMERA_DVP_BACKEND_DCMI
+
+            config CAMERA_GC032A_INTERFACE_SERIAL2BIT
+                bool "2-bit SPI (serial)"
+                select CAMERA_USING_SERIAL
+                select CAMERA_SERIAL_SPI_2BIT
+
+        endchoice
+
+        choice CAMERA_BF30A2_INTERFACE
+            prompt "BF30A2 interface"
+            depends on SENSOR_USING_BF30A2
+            default CAMERA_BF30A2_INTERFACE_SPI1
+
+            config CAMERA_BF30A2_INTERFACE_SPI1
+                bool "SPI1"
+                select CAMERA_USING_SPI_MODULE
+
+            config CAMERA_BF30A2_INTERFACE_SPI2
+                bool "SPI2"
+                select CAMERA_USING_SPI_MODULE
+
+        endchoice
+
+    endmenu
+
+    # ---- backend selectors (selected by the per-model interface) -------
+    # The interface choice members `select` these; no model/interface OR
+    # conditions are needed here.
     config CAMERA_USING_DVP
         bool
-        depends on SOC_SF32LB57X
-        default y if CAMERA_MODEL = "ov2640" && CAMERA_INTERFACE = "dvp"
-        default y if CAMERA_MODEL = "gc032a" && CAMERA_INTERFACE = "dvp"
 
     config CAMERA_USING_SERIAL
         bool
-        depends on SOC_SF32LB57X
-        default y if CAMERA_MODEL = "gc032a" && CAMERA_INTERFACE = "serial2bit"
 
     config CAMERA_USING_SPI_MODULE
         bool
-        default y if CAMERA_MODEL = "ov2640" && CAMERA_INTERFACE = "spi1"
-        default y if CAMERA_MODEL = "ov2640" && CAMERA_INTERFACE = "spi2"
-        default y if CAMERA_MODEL = "bf30a2" && CAMERA_INTERFACE = "spi1"
-        default y if CAMERA_MODEL = "bf30a2" && CAMERA_INTERFACE = "spi2"
 
-    # OV2640 has no serial pixel output; its SPI path is always an ArduCam
-    # FIFO module. BF30A2 streams directly over SPI, so it is not included.
     config CAMERA_USING_ARDUCAM_FIFO
         bool
-        default y if CAMERA_MODEL = "ov2640" && CAMERA_INTERFACE = "spi1"
-        default y if CAMERA_MODEL = "ov2640" && CAMERA_INTERFACE = "spi2"
 
-    # Existing GC032A driver code uses this model+interface selector.
-    config CAMERA_GC032A_INTERFACE_SERIAL_2BIT
-        bool
-        depends on SOC_SF32LB57X
-        default y if CAMERA_MODEL = "gc032a" && CAMERA_INTERFACE = "serial2bit"
-
-    # ---- interface string -> SPI instance ------------------------------
+    # ---- interface option -> SPI instance ------------------------------
     config CAMERA_SPI_BUS
         string
         depends on CAMERA_USING_SPI_MODULE
-        default "spi1" if CAMERA_INTERFACE = "spi1"
-        default "spi2" if CAMERA_INTERFACE = "spi2"
+        default "spi1" if CAMERA_OV2640_INTERFACE_SPI1 || CAMERA_BF30A2_INTERFACE_SPI1
+        default "spi2" if CAMERA_OV2640_INTERFACE_SPI2 || CAMERA_BF30A2_INTERFACE_SPI2
 
     # ---- backend -> SDK peripheral ------------------------------------
     config CAMERA_DVP_BACKEND_DCMI
         bool
-        depends on SOC_SF32LB57X
-        default y if CAMERA_USING_DVP
         select BSP_USING_DCMI
 
     config CAMERA_SERIAL_SPI_2BIT
         bool
-        depends on SOC_SF32LB57X
-        default y if CAMERA_USING_SERIAL
         select BSP_USING_DCMI
 
     # ---- SPI instance -> driver/DMA -----------------------------------
@@ -120,10 +172,45 @@ if PKG_USING_CAMERA_FRAMEWORK
         default "dvp" if CAMERA_USING_DVP
         default "arducam_fifo" if CAMERA_USING_ARDUCAM_FIFO
 
+    # ---- camera hardware (board values via configdefault) --------------
+    menu "Camera hardware"
+
+        config CAMERA_I2C_DEVICE_NAME
+            string "I2C device name"
+            help
+              SCCB I2C bus used by the sensor. The board supplies it through
+              "configdefault CAMERA_I2C_DEVICE_NAME" in its Kconfig.board.
+
+        config CAMERA_XCLK_ENABLE
+            bool "Camera XCLK (MCLK) output"
+            select BSP_USING_PWM
+            select BSP_USING_PWMT1 if CAMERA_XCLK_PWM_DEVICE_NAME = "pwmt1"
+            select BSP_USING_PWMT2 if CAMERA_XCLK_PWM_DEVICE_NAME = "pwmt2"
+            help
+              Drive the sensor MCLK/XCLK from a board PWM timer. The pad mux and
+              the timer wiring are board hardware: the board only supplies the
+              PWM device name and channel as configdefaults in its
+              Kconfig.board.
+
+        config CAMERA_XCLK_PWM_DEVICE_NAME
+            string "XCLK PWM device name"
+            default "" if !CAMERA_XCLK_ENABLE
+            help
+              RT-Thread PWM device that generates the sensor MCLK, e.g.
+              "pwmt2". Only "pwmt1" and "pwmt2" have their timer driver
+              selected automatically; a board using another instance enables it
+              in its own Kconfig.board/board.conf.
+
+        config CAMERA_XCLK_PWM_CHANNEL
+            int "XCLK PWM channel"
+            default 0 if !CAMERA_XCLK_ENABLE
+
+    endmenu # Camera hardware
+
     # ---- derived MCLK requirement --------------------------------------
-    # The board owns CAMERA_XCLK_ENABLE and the PWM device/channel macros
-    # directly in its Kconfig.board. The component only derives whether the
-    # selected sensor needs a clock.
+    # The board owns the CAMERA_XCLK_ENABLE value and the PWM device/channel
+    # through configdefault; the component only derives whether the selected
+    # sensor needs a clock.
     config CAMERA_XCLK_REQUIRED
         bool
         default y if SENSOR_USING_OV2640 && !CAMERA_USING_ARDUCAM_FIFO

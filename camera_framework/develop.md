@@ -3,7 +3,8 @@
 > 适用范围：`camera_framework/` 目录内的 Handle 层、传感器驱动（OV2640 / GC032A / BF30A2）、
 > SCCB 控制总线、DVP / DCMI / SPI 数据总线，以及内置的软件 ISP / JPEG 编解码。
 >
-> 目标平台：SF32LB57X，RT-Thread + SiFli SDK。
+> 目标平台：RT-Thread + SiFli SDK。组件不按 SoC 型号过滤；具体板子是否有摄像头由板级
+> `BSP_USING_CAMERA1` 决定。
 >
 > 应用层只需要包含一个头文件：`core/handle/camera_handle.h`。
 
@@ -204,7 +205,7 @@ scons --board=<board> -j8               # 编译
 CONFIG_CAMERA_OV2640_INTERFACE_ARDUCAM_FIFO=y
 ```
 
-2. **并行 DVP 只有 SDK DCMI 一个后端，而且只支持 SF32LB57X。** 选择 `8-bit DVP` / `DVP` 接口后，`CAMERA_DVP_BACKEND_DCMI` 是隐藏符号（没有菜单项，无需选择），在 SF32LB57X 上 `default y` 并自动 `select BSP_USING_DCMI`，该后端直接使用 SDK 的 `dcmi` 设备驱动；框架会在编译期 `#error` 要求 `BSP_USING_DCMI` 已启用，外设、DMA 通道和中断向量都由 SDK 驱动持有。52x/56x 上没有任何并行 DVP 采集路径：GC032A 请选 `2-bit SPI`，OV2640 请选 `Arducam SPI FIFO`。
+2. **并行 DVP 只有 SDK DCMI 一个后端，组件不按 SoC 型号过滤。** 选择 `8-bit DVP` / `DVP` 接口后，`CAMERA_DVP_BACKEND_DCMI` 是隐藏符号（没有菜单项，无需选择），会自动 `select BSP_USING_DCMI`，该后端直接使用 SDK 的 `dcmi` 设备驱动；框架会在编译期 `#error` 要求 `BSP_USING_DCMI` 已启用，外设、DMA 通道和中断向量都由 SDK 驱动持有。是否有 DCMI 由板级负责：只有确实引出 DCMI 的板子才应打开 `BSP_USING_CAMERA1`；没有 DCMI 的板子不要启用相机。
 
 ### 3.3 单帧拍照（同步）
 
@@ -400,17 +401,32 @@ camera_change_settings(cam, &cfg);
 
 ### 4.1 Kconfig 选项
 
-框架的型号/接口菜单已经移到 SDK 的 `customer/peripherals/camera/Kconfig`
-（`Board Peripherals -> Camera 1`）；`camera_framework/Kconfig` 只保留
-`PKG_USING_CAMERA_FRAMEWORK`、MCLK 派生符号和 `software/`。下表的符号名不变，
-但 `SENSOR_USING_*` / `CAMERA_*` 由 SDK Camera 模块定义。
+框架的型号、接口和相机硬件菜单都在 `camera_framework/Kconfig` 里
+（`Camera drivers -> Camera selection` / `Camera hardware`）。
+`BSP_USING_CAMERA1`（板级是否有 Camera 1 座子）声明在板级 `Kconfig.board`，
+`sf-pkg.yaml` 用它决定是否拉取组件；组件在 `BSP_USING_CAMERA1=y` 时默认打开
+`PKG_USING_CAMERA_FRAMEWORK`。组件 Kconfig 不再依赖 `SOC_SF32LB57X` 之类的 SoC
+型号符号，板子没有 DCMI 时不要打开 `BSP_USING_CAMERA1`。
 
 **传感器与接口**
 
 | 选项 | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- |
-| `PKG_USING_CAMERA_FRAMEWORK` | bool | n | 框架使能符号（SF-PKG 入口）；由 Camera 模块在选中型号时 `select`，会 `select RT_USING_SYSTEM_WORKQUEUE` |
-| `SENSOR_USING_OV2640` / `SENSOR_USING_GC032A` / `SENSOR_USING_BF30A2` | choice | GC032A | 当前激活的传感器（单选，在 SDK 的 Camera 1 菜单里）；通信形式在其子菜单里选 |
+| `PKG_USING_CAMERA_FRAMEWORK` | bool | y if BSP_USING_CAMERA1 | 框架使能符号（SF-PKG 入口），会 `select RT_USING_SYSTEM_WORKQUEUE` |
+| `SENSOR_USING_OV2640` / `SENSOR_USING_GC032A` / `SENSOR_USING_BF30A2` | choice | 板级同名 choice stub 的 `default` | 当前传感器，menuconfig 里只能选一个；完整 choice 在组件，板级只写 default stub |
+| `CAMERA_OV2640_INTERFACE_DVP` / `_SPI1` / `_SPI2` | choice | 板级同名 choice stub，兜底 DVP | OV2640 的驱动方式，仅在选中 OV2640 时显示 |
+| `CAMERA_GC032A_INTERFACE_DVP` / `_SERIAL2BIT` | choice | 板级同名 choice stub，兜底 DVP | GC032A 的驱动方式，仅在选中 GC032A 时显示 |
+| `CAMERA_BF30A2_INTERFACE_SPI1` / `_SPI2` | choice | 板级同名 choice stub，兜底 SPI1 | BF30A2 的驱动方式，仅在选中 BF30A2 时显示 |
+| `CAMERA_USING_DVP` / `_SERIAL` / `_SPI_MODULE` / `_ARDUCAM_FIFO` | 派生 bool | — | 由接口 choice 成员 `select`，不直接配置 |
+
+> 型号和接口都是 `choice`，menuconfig 里天然只能选一个。完整 choice 由组件定义；
+> 板级只重开同名 choice 写默认值（`choice SENSOR_MODEL default ... endchoice` 以及
+> `choice CAMERA_<MODEL>_INTERFACE default ... endchoice`）。**不要**对 choice 成员直接写
+> `configdefault SENSOR_USING_*` / `CAMERA_<MODEL>_INTERFACE_*`：kconfiglib 会报
+> `default on the choice symbol ... will have no effect`，SDK 把 warning 当 error。
+> 接口按型号各有一个 choice：选中某个型号后，只显示该型号支持的驱动方式，不支持的项
+> 根本不会出现，不需要公共接口 + 一堆 `depends on A || B`。板级给的接口若该型号不支持，
+> 会自动退回该型号的兜底默认接口。
 
 > 帧等待超时不再是菜单项，改由驱动自己的常量决定：
 > `OV2640_FRAME_TIMEOUT_MS`（30000）、`GC032A_FRAME_TIMEOUT_MS`（1000）、
@@ -418,30 +434,23 @@ camera_change_settings(cam, &cfg);
 
 **控制总线（SCCB）**
 
-框架 Kconfig **没有** SCCB 菜单了：
-
-- 总线名与引脚都是板级事实：板级用 `CAMERA_I2C_DEVICE_NAME` 给出总线名，并在自己的 `bsp_pinmux.c` 里复用 SCL/SDA（框架不 `HAL_PIN_Set` 任何引脚）。
-- 总线时序是驱动常量：`OV2640_SCCB_TIMEOUT_MS` / `_MAX_HZ`、`GC032A_SCCB_TIMEOUT_MS` / `_MAX_HZ`（BF30A2 在自己的 `i2c_init()` 里给出）。
+框架 Kconfig **没有** SCCB 引脚/时序菜单：板级用 `configdefault CAMERA_I2C_DEVICE_NAME`
+给出总线名，并在自己的 `bsp_pinmux.c` 里复用 SCL/SDA；总线时序是驱动常量。
 
 **数据总线（通信形式）**
 
-菜单跟着所选摄像头变：
+型号选项和接口选项组合后，backend 自动推导：
 
-| 所选传感器 | 菜单内容 |
-| --- | --- |
-| OV2640 | `OV2640 communication form`：`8-bit DVP（并行）` / `SPI（ArduCam FIFO 模组）` |
-| GC032A | `GC032A communication form`：`8-bit DVP（并行）` / `2-bit SPI（串行）` |
-| BF30A2 | `BF30A2 SPI bus`：`SPI1` / `SPI2`（它固定走 SPI） |
-| OV2640 + ArduCam FIFO | 额外出现 `ArduCam SPI bus`：`SPI1` / `SPI2` |
+| 传感器选项 | 该型号的接口选项 | 推导结果 |
+| --- | --- | --- |
+| `SENSOR_USING_OV2640` | `CAMERA_OV2640_INTERFACE_DVP` | `CAMERA_USING_DVP` → `CAMERA_DVP_BACKEND_DCMI` |
+| `SENSOR_USING_OV2640` | `CAMERA_OV2640_INTERFACE_SPI1` / `_SPI2` | `CAMERA_USING_SPI_MODULE` + `CAMERA_USING_ARDUCAM_FIFO` |
+| `SENSOR_USING_GC032A` | `CAMERA_GC032A_INTERFACE_DVP` | `CAMERA_USING_DVP` → `CAMERA_DVP_BACKEND_DCMI` |
+| `SENSOR_USING_GC032A` | `CAMERA_GC032A_INTERFACE_SERIAL2BIT` | `CAMERA_USING_SERIAL` → `CAMERA_SERIAL_SPI_2BIT` |
+| `SENSOR_USING_BF30A2` | `CAMERA_BF30A2_INTERFACE_SPI1` / `_SPI2` | `CAMERA_USING_SPI_MODULE`（`CAMERA_SPI_BUS` 对应 spi1/spi2） |
 
-| 选项 | 说明 |
-| --- | --- |
-| `CAMERA_OV2640_INTERFACE_DVP` / `_ARDUCAM_FIFO` | 8 线并行，或经 ArduCam FIFO 模组走 SPI（OV2640 本身没有串行像素输出） |
-| `CAMERA_GC032A_INTERFACE_DVP_8BIT` / `_SERIAL_2BIT` | 8 线并行，或 GC032A 自带 2-bit 串行（进 DCMI SPI 包模式） |
-| `CAMERA_ARDUCAM_SPI_BUS1/2` | ArduCam 模组挂在哪条 SPI；会 `select` 对应 SPI 驱动与 DMA |
-| `CAMERA_BF30A2_SPI_BUS1/2` | BF30A2 用哪条 SPI；会 `select` 对应 SPI 驱动与环形 DMA |
-| `CAMERA_DVP_BACKEND_DCMI` | 隐藏：并行 DVP 的唯一后端（SDK `dcmi` 设备驱动） |
-| `CAMERA_SERIAL_SPI_2BIT` | 隐藏：2-bit 串行采集（同一个 DCMI 的 SPI 包模式） |
+每个型号的 choice 只包含该型号支持的接口，所以不存在“GC032A + SPI1”这种非法组合；
+`SConscript` 仍会校验型号/接口各选一个，以及 `CAMERA_CONFIG_VALID` 为 y。
 
 > 引脚永远不是菜单项：复用/上下拉/驱动能力都在板级 `bsp_pinmux.c`；SPI 设备名、SPI 频率、FIFO scratch/worker 栈、2-bit 串行包格式都是驱动/后端常量。
 >
@@ -453,9 +462,9 @@ camera_change_settings(cam, &cfg);
 
 | 选项 | 说明 |
 | --- | --- |
-| `CAMERA_XCLK_ENABLE` | **板级符号**：是否由 MCU 输出 MCLK；编进来的传感器需要时钟（OV2640 走 DVP / GC032A / BF30A2）而板级没定义它时，`camera_xclk.c` 编译期 `#error` |
+| `CAMERA_XCLK_ENABLE` | **板级默认值；组件 `Camera hardware` 菜单定义**：是否由 MCU 输出 MCLK；传感器需要时钟（OV2640 走 DVP / GC032A / BF30A2）而板级没打开它时，`camera_xclk.c` 编译期 `#error` |
 | `CAMERA_XCLK_EXTERNAL_OSC` | **板级符号**：模组自带晶振，抵消上面那条需求检查（不需要 PWM 设备名/通道） |
-| `CAMERA_XCLK_PWM_DEVICE_NAME` / `CAMERA_XCLK_PWM_CHANNEL` | **板级符号**：驱动 MCLK 的 PWM 设备与通道（MCLK pad 与定时器通道由 `bsp_pinmux.c` 复用） |
+| `CAMERA_XCLK_PWM_DEVICE_NAME` / `CAMERA_XCLK_PWM_CHANNEL` | **板级默认值；组件 `Camera hardware` 菜单定义**：驱动 MCLK 的 PWM 设备与通道（MCLK pad 与定时器通道由 `bsp_pinmux.c` 复用） |
 | `CAMERA_ISP_HARDWARE` / `CAMERA_ISP_SOFTWARE` | ISP 走传感器自带还是软件管线 |
 | `CAMERA_SW_ISP_RUN_ON_HCPU` / `_ACPU`、`CAMERA_SW_ISP_GAMMA/AWB/TONE` | 软件 ISP 的运行核与各级开关 |
 | `CAMERA_SW_JPEG`、`CAMERA_SW_JPEG_ENCODER` / `_DECODER`、`CAMERA_SW_JPEG_RUN_ON_HCPU` / `_ACPU` | 软件 JPEG 编解码 |
@@ -477,84 +486,77 @@ camera_change_settings(cam, &cfg);
 
 ### 4.3 板级 `Kconfig.board` 示例（`sf32lb57-dpi-hdk_base`）
 
-框架侧只读板级符号；下面是 SDK 里已经落地并可编译的完整写法
-（`customer/boards/sf32lb57-dpi-hdk_base/Kconfig.board`）：
+板级只给**组件定义的符号**赋值，不定义组件符号；所有 `configdefault` 都放在
+`if BSP_USING_CAMERA1 && PKG_USING_CAMERA_FRAMEWORK` 里：
 
 ```kconfig
-# ---- 相机 I2C：只有总线名，没有引脚 -------------------------------------
-config CAMERA_I2C_DEVICE_NAME
-    string
-    default "i2c1"
+menu "SF32LB57-SPI-HDK Configuration"
 
-menu "SF32LB57-SPI-HDK Configuration"      # 板级原样：菜单名沿用了 SPI-HDK 板
-
-# ---- 引脚复用选择权在板级；bsp_pinmux.c 按所选 PINMAP 复用 DVP/MCLK ----
-choice
-    prompt "DVP Pinmap"
-    default BOARD_DVP_PINMAP_0
-    config BOARD_DVP_PINMAP_0
-        bool "DVP_VSYNC on PA00"      # MCLK = PA02 -> GPTIM2_CH1
-    config BOARD_DVP_PINMAP_1
-        bool "TDVP_VSYNC on PA26"     # MCLK = PA28 -> GPTIM2_CH1
-endchoice
-
-# ---- 板级自己的分组开关（纯板级符号，框架不读它）-----------------------
-config BOARD_CAMERA_HW
-    bool "Camera connector wired (DVP pads + MCLK)"
-    default y if BSP_USING_DCMI
-    help
-      Turn this off in a project that fits no camera: the PWM instance below is
-      then not allocated at all. It matters for BOARD_DVP_PINMAP_0 in
-      particular, whose DVP pads share PA00..PA10 with SD1/SD2.
-
-if BOARD_CAMERA_HW
-
-# ---- 外设分配：板级知道自己用的是哪个 PWM 驱动实例 ----------------------
-config CAMERA_XCLK_ENABLE
-    bool "MCU feeds the sensor MCLK"
-    default y
-    select BSP_USING_PWM
-    select BSP_USING_PWMT2
-    help
-      Drive the sensor master clock from the board timer. Set to n for a module
-      that carries its own oscillator; the PWM driver is then not pulled in
-      either.
-
-config CAMERA_XCLK_PWM_DEVICE_NAME
-    string
-    default "pwmt2"
-
-config CAMERA_XCLK_PWM_CHANNEL
-    int
-    range 1 4
-    default 1
-
-endif # BOARD_CAMERA_HW
-
-# ---- Camera 1 只做硬件开关；型号/接口在 SDK Camera 菜单里选 --------------
 config BSP_USING_CAMERA1
     bool "Camera 1"
     default n
     help
       Enable this in proj.conf for projects that have a camera on the
       Camera 1 connector. The sensor model and communication form are
-      selected under Board Peripherals -> Camera 1.
+      selected under Camera drivers -> Camera selection in the
+      camera_framework component.
+
+# 组件未拉取时 PKG_USING_CAMERA_FRAMEWORK 未定义，整个块为假：
+# 所有 configdefault 都是 inactive，bootloader/ACPU 不会误报。
+if BSP_USING_CAMERA1 && PKG_USING_CAMERA_FRAMEWORK
+    # 完整 choice 在组件里；板级只重开同名 choice 写默认值
+    choice SENSOR_MODEL
+        default SENSOR_USING_OV2640
+    endchoice
+
+    # 只给当前默认型号写一个接口 default-only stub（其他型号用组件 fallback）
+    choice CAMERA_OV2640_INTERFACE
+        default CAMERA_OV2640_INTERFACE_DVP
+    endchoice
+
+    # 相机 I2C：只有总线名，没有引脚
+    configdefault CAMERA_I2C_DEVICE_NAME
+        default "i2c1"
+
+    # 外设分配：MCLK 由 PWMT2_CH1 输出
+    configdefault CAMERA_XCLK_ENABLE
+        default y
+
+    configdefault CAMERA_XCLK_PWM_DEVICE_NAME
+        default "pwmt2"
+
+    configdefault CAMERA_XCLK_PWM_CHANNEL
+        default 1
+endif
 
 endmenu
 ```
 
 要点：
 
-1. **只出现 SDK 域和板级符号**：`BSP_USING_DCMI`、`BSP_USING_PWM(T2)` 是 SDK 域，`BOARD_*` / `CAMERA_*` 是板级；**不能出现** `CAMERA_FRAMEWORK_*` / `CAMERA_USING_*`。`BOARD_CAMERA_HW` 是板级内部的分组开关，框架不读它。
-2. **`DVP Pinmap` choice 不要塞进 `if BOARD_CAMERA_HW`**：`bsp_pinmux.c` 的门控仍是 `#if defined(BSP_USING_DCMI)`（框架 select 的），把 choice 藏起来会让 `#ifdef BOARD_DVP_PINMAP_*` 两个分支都不成立 → 一个 pad 都不复用 → 相机静默不工作。
-3. **两套 PINMAP 的 MCLK 都是 `GPTIM2_CH1`**，所以设备名/通道不需要按 PINMAP 分支；设备名 `"pwmt2"` 来自 SDK 的 `PWMT2_CONFIG`（`customer/boards/include/config/sf32lb57x/pwm_config.h`）。
-4. **模组自带晶振**时不要打开 `CAMERA_XCLK_ENABLE`，而是在同一段里声明
-   `config CAMERA_XCLK_EXTERNAL_OSC` + `bool`，这样框架的需求检查才会放过它。
-5. **想让"关掉相机"也释放引脚**（`BOARD_DVP_PINMAP_0` 与 SD1/SD2 冲突时有用），把 `bsp_pinmux.c` 的
-   `#if defined(BSP_USING_DCMI)` 换成 `#if defined(BOARD_CAMERA_HW)`；不改也没问题，只是关掉相机后引脚仍被复用。
-6. **验证**：编译后 `grep -E "BOARD_CAMERA_HW|CAMERA_XCLK|BSP_USING_PWMT2" build_<board>_hcpu/rtconfig.h`，
-   期望 `BOARD_CAMERA_HW=y`、`CAMERA_XCLK_ENABLE=y`、`CAMERA_XCLK_PWM_DEVICE_NAME="pwmt2"`、`CAMERA_XCLK_PWM_CHANNEL=1`、`BSP_USING_PWMT2=y`；
-   板级目录里再 `grep -rnE "CAMERA_FRAMEWORK_|CAMERA_USING_" customer/boards/`，应无输出。
+1. **只出现组件符号、板级符号和 SDK 符号**：`BSP_USING_DCMI`、`BSP_USING_PWM(T2)`
+   是 SDK 域，`BOARD_*` 是板级；**不能出现** `CAMERA_FRAMEWORK_*` /
+   `CAMERA_USING_*`。
+2. **型号/接口都用 default-only 同名 choice**：板级写
+   `choice SENSOR_MODEL default ... endchoice` 和
+   `choice CAMERA_<MODEL>_INTERFACE default ... endchoice`，完整 choice 在组件；
+   bootloader/ACPU 里空 stub 依赖为假，由新版 kconfiglib 视为 inert。**不要**写
+   `configdefault SENSOR_USING_*` 或对接口 choice 成员写 `configdefault`。
+3. **`PKG_USING_CAMERA_FRAMEWORK` 守卫不能省**：bootloader/ACPU 不 source 组件，
+   未定义符号让整块为假；否则 active 的 `configdefault` 会触发
+   `configdefault for ... is active ... but the symbol has no 'config' or
+   'menuconfig' definition`。
+4. **引脚永远不是菜单项**：DVP/MCLK 引脚复用、上下拉、驱动能力都在板级
+   `bsp_pinmux.c`；SPI 设备名、SPI 频率、FIFO scratch/worker 栈、2-bit 串行包格式
+   都是驱动/后端常量。
+5. **模组自带晶振**时不要打开 `CAMERA_XCLK_ENABLE`，而是在板级声明
+   `config CAMERA_XCLK_EXTERNAL_OSC` + `bool`，框架的需求检查才会放过它。
+6. **验证**：编译后
+   `grep -E "SENSOR_USING_|CAMERA_OV2640_INTERFACE|CAMERA_XCLK|BSP_USING_PWMT2" build_<board>_hcpu/rtconfig.h`，
+   期望 `SENSOR_USING_OV2640=y`、`CAMERA_OV2640_INTERFACE_DVP=y`、`CAMERA_XCLK_ENABLE=y`、
+   `CAMERA_XCLK_PWM_DEVICE_NAME="pwmt2"`、`CAMERA_XCLK_PWM_CHANNEL=1`、
+   `BSP_USING_PWMT2=y`；板级目录里再
+   `grep -rnE "CAMERA_FRAMEWORK_|CAMERA_USING_" customer/boards/`，应无输出。
 
 ---
 
@@ -562,7 +564,7 @@ endmenu
 
 采集链路随后端实现不同，不存在统一的“先落内部缓冲、再整理给应用”顺序。
 
-**DCMI 后端（SF32LB57x）：DMA 直写调用方缓冲**
+**DCMI 后端：DMA 直写调用方缓冲**
 
 ```text
 传感器 → DCMI + DMA → 应用提供的缓冲
@@ -821,13 +823,14 @@ elif GetDepend('CAMERA_USING_ARDUCAM_FIFO'):
 
 | 传感器接口 | 采集方式 | 编译的后端 | 注册名 / 类型 | 引脚复用责任 |
 | --- | --- | --- | --- | --- |
-| OV2640 / GC032A `8-bit DVP`（仅 57x） | SDK DCMI device driver | `dcmi.c` | `CAMERA_DATA_BUS_ADAPTER_NAME`（默认 `"dvp"`）/ `BUS_TYPE_DVP` | **板级** `bsp_pinmux.c`（`BSP_USING_DCMI` 块） |
-| GC032A `2-bit SPI`（仅 57x） | DCMI SPI 2-bit packet mode | `dcmi.c`（`CAMERA_SERIAL_SPI_2BIT`） | `"dcmi"` / `BUS_TYPE_SPI` | **板级** `bsp_pinmux.c`（`BSP_USING_DCMI` 块，CLK/DI0/DI1） |
+| OV2640 / GC032A `8-bit DVP` | SDK DCMI device driver | `dcmi.c` | `CAMERA_DATA_BUS_ADAPTER_NAME`（默认 `"dvp"`）/ `BUS_TYPE_DVP` | **板级** `bsp_pinmux.c`（`BSP_USING_DCMI` 块） |
+| GC032A `2-bit SPI` | DCMI SPI 2-bit packet mode | `dcmi.c`（`CAMERA_SERIAL_SPI_2BIT`） | `"dcmi"` / `BUS_TYPE_SPI` | **板级** `bsp_pinmux.c`（`BSP_USING_DCMI` 块，CLK/DI0/DI1） |
 | OV2640 `Arducam SPI FIFO` | 模组自带 FIFO | `arducam_fifo.c` + `arducam_fifo_controller.c` | `"arducam_fifo"` / `BUS_TYPE_SPI` | **板级**（SPI pad）；传感器驱动只管 SCCB |
 | BF30A2 | 模组自带 SPI 输出 | `bf30a2.c` 驱动 + SPI | 见驱动内声明 | **板级**（SPI + RESET pad） |
 
-> 52x/56x 没有采图后端：GPIO 采样 + 定时器 DMA 的 2-bit 串行实现（`camera_serial*.c`）
-> 已整体删除，这些平台只保留 SCCB/XCLK 等控制侧能力。
+> 采图路径依赖板级是否提供 DCMI/SPI：板子没有 DCMI 时不要打开
+> `BSP_USING_CAMERA1`。GPIO 采样 + 定时器 DMA 的 2-bit 串行实现
+> （`camera_serial*.c`）已整体删除。
 
 其他与源码选择相关的配置：
 
@@ -886,9 +889,9 @@ camera_stop_stream()
 
 **异步单帧**：在内部 worker 上投递请求，完成或超时后回调 `camera_capture_done_callback_t`；同一时刻只允许一笔在途请求。
 
-### 8.3 硬件 DCMI 后端（SF32LB57x）
+### 8.3 硬件 DCMI 后端
 
-GC032A 选择 `8-bit DVP`，或 OV2640 选择 `DVP`（两者都只在 SF32LB57X 上可选）；并行 DVP 只有 SDK DCMI 一个后端，`CAMERA_DVP_BACKEND_DCMI` 隐藏且默认启用，会自动 `select BSP_USING_DCMI`，不需要手动改动。
+GC032A 选择 `8-bit DVP`，或 OV2640 选择 `DVP`；组件不按 SoC 型号过滤，是否有 DCMI 由板级决定。并行 DVP 只有 SDK DCMI 一个后端，`CAMERA_DVP_BACKEND_DCMI` 隐藏且默认启用，会自动 `select BSP_USING_DCMI`，不需要手动改动。
 此后端通过 SDK 的 `dcmi` 设备驱动使用 DCMI 与 DMA：外设、DMA 通道和中断向量由 SDK 驱动持有，框架负责采集编程与 JPEG 帧收尾。DMA 半传输/全传输/错误经 `rt_device_set_rx_indicate` 上报；DCMI 的帧/溢出/包长事件由 **SDK 自己的** `HAL_DCMI_FrameEventCallback`（`drv_dcmi.c`）记录并通过同一个通知抛出，框架只额外重写 `HAL_DCMI_ErrorCallback`。D0-D7、PCLK、HREF、VSYNC 与 MCLK 的引脚复用由开发板自己的 `bsp_pinmux.c`（`BSP_USING_DCMI` 块）完成，应用不提供 `HAL_DCMI_MspInit()`；板级 `BSP_CAMERA_PowerUp()` / `BSP_CAMERA_PowerDown()` 由后端 init/deinit 调用。默认在 PCLK 上升沿采样，板级可用 `CAMERA_DCMI_PCLK_FALLING` 改为下降沿。
 
 `camera_start_stream()` 默认使用 `CAMERA_STREAM_MODE_FRAME`：一次提交两块相邻、64 字节对齐的帧缓冲，单帧大小也必须是 64 字节的整数倍。DMA 半传输/全传输通知分别对应两个完整帧，后端不会逐帧停止再重启 DCMI。
@@ -1327,7 +1330,7 @@ INIT_BOARD_EXPORT(my_bus_register);           /* 开机自动注册 */
 
 | 现象 | 可能原因与处理 |
 | --- | --- |
-| 编译报 `The hardware DCMI camera backend requires SF32LB57X` 或 `The camera DCMI backend requires the SDK DCMI driver: enable BSP_USING_DCMI` | 并行 DVP 只支持 SF32LB57X：52x/56x 上没有 DVP 采集路径，请改用 GC032A 的 `2-bit SPI` 或 OV2640 的 `Arducam SPI FIFO`。若是后一条，说明 `BSP_USING_DCMI` 没打开，应让 `CAMERA_DVP_BACKEND_DCMI` 自动 select 它 |
+| 编译报 `The camera DCMI backend requires the SDK DCMI driver: enable BSP_USING_DCMI` | `BSP_USING_DCMI` 没打开；应让 `CAMERA_DVP_BACKEND_DCMI` / `CAMERA_SERIAL_SPI_2BIT` 自动 select 它。组件不再按 SoC 型号过滤，但板子没有 DCMI 时不要打开 `BSP_USING_CAMERA1` |
 | `camera_handler_instance_init()` 返回 `CAMERA_ERRORRESOURCE` | 没有可用驱动：确认 `Camera drivers` 里选中了传感器，且链接脚本保留了 `CameraDriverDescTab` section |
 | `camera_handler_instance_init()` 返回 `CAMERA_ERROR` | 驱动 open 失败：优先看 SCCB/I2C、引脚、XCLK 与传感器 ID 读取，而不是上层参数 |
 | 日志出现 `adapter not found` 或总线类型不匹配 | Kconfig 选的接口与驱动声明的总线类型不一致；检查 `Data bus settings` 与 `CAMERA_DATA_BUS_ADAPTER_NAME` |
@@ -1383,13 +1386,12 @@ INIT_BOARD_EXPORT(my_bus_register);           /* 开机自动注册 */
 
 | 符号 | 类型 | 含义 |
 | --- | --- | --- |
-| `PKG_USING_CAMERA_FRAMEWORK` | bool | 框架总开关（`Camera drivers` 菜单，SF-PKG 入口符号） |
-| `SENSOR_USING_<X>` | choice | 当前传感器 |
-| `CAMERA_<X>_INTERFACE_<Y>` | choice | 通信形式（`Data bus settings` 里按所选传感器显示）；决定 `CAMERA_USING_DVP/SERIAL/ARDUCAM_FIFO` |
-| `CAMERA_ARDUCAM_SPI_BUS1/2`、`CAMERA_BF30A2_SPI_BUS1/2` | choice | 模组挂在哪条 SPI，并 `select` 对应 SPI 驱动 + DMA；派生 `CAMERA_*_SPI_BUS_NAME` |
-| `CAMERA_USING_DVP` / `CAMERA_USING_SERIAL` / `CAMERA_USING_ARDUCAM_FIFO` | bool | 后端大类（由接口选择自动置位，不要手改） |
-| `CAMERA_DVP_BACKEND_DCMI` | bool（隐藏，无提示） | 并行 DVP 的唯一实现：SDK `dcmi` 设备驱动（仅 SF32LB57X，自动 `select BSP_USING_DCMI`） |
-| `CAMERA_SERIAL_SPI_2BIT` | bool（隐藏） | 2-bit 采集的唯一实现：DCMI SPI 包模式（仅 SF32LB57X，自动 `select BSP_USING_DCMI`）；GPIO 采样后端已删除 |
+| `PKG_USING_CAMERA_FRAMEWORK` | bool | 框架总开关（`Camera drivers` 菜单，SF-PKG 入口符号；`BSP_USING_CAMERA1=y` 时默认打开） |
+| `SENSOR_USING_OV2640` / `SENSOR_USING_GC032A` / `SENSOR_USING_BF30A2` | choice | 传感器，单选；完整 choice 在组件，板级只写 default-only 同名 choice |
+| `CAMERA_OV2640_INTERFACE_*` / `CAMERA_GC032A_INTERFACE_*` / `CAMERA_BF30A2_INTERFACE_*` | choice | 每个型号独立的接口 choice，只显示该型号支持的项；板级只写 default-only 同名 choice |
+| `CAMERA_USING_DVP` / `CAMERA_USING_SERIAL` / `CAMERA_USING_SPI_MODULE` / `CAMERA_USING_ARDUCAM_FIFO` | 派生 bool | 后端大类（由型号 + 接口自动置位，不要手改） |
+| `CAMERA_DVP_BACKEND_DCMI` | bool（隐藏，无提示） | 并行 DVP 的唯一实现：SDK `dcmi` 设备驱动（自动 `select BSP_USING_DCMI`；不依赖 SoC 型号） |
+| `CAMERA_SERIAL_SPI_2BIT` | bool（隐藏） | 2-bit 采集的唯一实现：DCMI SPI 包模式（自动 `select BSP_USING_DCMI`；不依赖 SoC 型号）；GPIO 采样后端已删除 |
 | `CAMERA_DATA_BUS_ADAPTER_NAME` | string | 当前数据总线适配器名（驱动与总线共用） |
 | `CAMERA_BOARD_HAS_MCLK` | bool（隐藏，派生） | 板级给了 MCLK：`default y if CAMERA_XCLK_ENABLE`。框架只读板级符号，反向不成立 |
 | `CAMERA_XCLK_REQUIRED` | bool（隐藏，派生） | 编进来的传感器需要主时钟（OV2640 走 ArduCam FIFO 时不算；GC032A/BF30A2 总是需要） |
@@ -1398,9 +1400,20 @@ INIT_BOARD_EXPORT(my_bus_register);           /* 开机自动注册 */
 | `CAMERA_SW_JPEG`、`CAMERA_SW_JPEG_ENCODER` / `_DECODER`、`CAMERA_SW_JPEG_RUN_ON_HCPU` / `_ACPU` | bool/choice | 软件 JPEG 编解码 |
 | `BSP_USING_DCMI` | bool | 并行 DVP（或 2-bit SPI 包模式）时**必须为 y**（`CAMERA_DVP_BACKEND_DCMI` / `CAMERA_SERIAL_SPI_2BIT` 会自动 select，框架编译期强制检查） |
 
-> 以上是框架 Kconfig 的**全部**内容（`Data bus settings` 里按所选摄像头出现的通信形式与 SPI 实例二选一也在此列）。
+> 型号、接口、相机硬件和软件 ISP/JPEG 的完整菜单由 `camera_framework/Kconfig` 持有。
 >
-> 下面这些符号框架会读，但**由板级 `Kconfig.board` 定义**：`CAMERA_I2C_DEVICE_NAME`、`CAMERA_XCLK_ENABLE`、`CAMERA_XCLK_PWM_DEVICE_NAME`、`CAMERA_XCLK_PWM_CHANNEL`、`CAMERA_XCLK_EXTERNAL_OSC`、`CAMERA_DCMI_PCLK_FALLING`、`CAMERA_BF30A2_RESET_PIN`；板级还可以用**自己的**分组开关（例如 `BOARD_CAMERA_HW`，纯板级符号）把"分配 PWM 实例、给设备名/通道"这一组收进 `if BOARD_CAMERA_HW`，并在这组里 `select BSP_USING_PWM` / 具体 PWM 实例。
+> 板级通过 default-only 的 `choice SENSOR_MODEL` / `choice CAMERA_<MODEL>_INTERFACE`
+> 写型号/接口默认值，通过 `configdefault` 给 `CAMERA_I2C_DEVICE_NAME`、
+> `CAMERA_XCLK_ENABLE`、`CAMERA_XCLK_PWM_DEVICE_NAME`、`CAMERA_XCLK_PWM_CHANNEL`
+> 提供默认值；型号/接口的最终选择由组件里的 choice 完成。**不要**写
+> `configdefault SENSOR_USING_*` / `configdefault CAMERA_<MODEL>_INTERFACE_*`
+> （choice 成员 default 会被 kconfiglib 判为无效并报警，构建把 warning 当 error）。
+> 这些 `configdefault` 统一放在
+> `if BSP_USING_CAMERA1 && PKG_USING_CAMERA_FRAMEWORK` 里。
+> `BSP_USING_CAMERA1` 声明在板级 `Kconfig.board`，由 `sf-pkg.yaml` 决定是否拉取
+> 本组件；组件没被拉取时 `PKG_USING_CAMERA_FRAMEWORK` 未定义、条件为假，这些
+> `configdefault` 全部 inactive，不会报错。整套方案不需要修改
+> `tools/kconfig/kconfiglib.py`。
 >
 > **依赖方向只能是自下而上**：板级声明能力，框架判断需求。
 > 需要时钟 + 板级给了 → 编 PWM 实现；需要时钟 + 板级没给 + 没声明 `CAMERA_XCLK_EXTERNAL_OSC` → 编译期 `#error`；不需要时钟（ArduCam 模组）或有 `CAMERA_XCLK_EXTERNAL_OSC` → 编空实现并 `LOG_W`。

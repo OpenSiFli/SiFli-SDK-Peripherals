@@ -17,11 +17,10 @@ msh> take_photo_async <framesize> <quality>
 
 ## 选择摄像头
 
-在 menuconfig 的 `Camera drivers -> Sensor settings -> Active camera sensor`
-中选择摄像头；选择 GC032A 后还可以选择 `8-bit DVP`（仅 SF32LB57X，
-52x/56x 上没有并行 DVP 采集路径）或 `2-bit SPI`，构建系统只会编译选中的
-sensor 和 data backend。
-BF30A2 使用固定的 RGB565/240×320 模式。
+在 menuconfig 的 `Camera drivers -> Camera selection -> Camera model`
+中选择摄像头；选择 GC032A 后还可以选择 `8-bit DVP` 或 `2-bit SPI`，构建系统只会编译
+选中的 sensor 和 data backend。是否有 DCMI 由板级决定，没有 DCMI 的板子不要打开
+`BSP_USING_CAMERA1`。BF30A2 使用固定的 RGB565/240×320 模式。
 
 - `take_photo` 会查询当前摄像头能力：支持 JPEG 时保存 `.jpg`，否则使用
   RGB565 并保存 `.ppm`。

@@ -64,6 +64,32 @@ dkms.conf
 # SCons
 .sconsign.dblite
 
+# Build outputs
+**/build_*/
+**/build/
+
 # Example project build outputs
 camera_framework/examples/**/project/build*/
 camera_framework/tests/**/project/build*/
+
+# Kconfig / tool scratch files
+Kconfig.tmp
+
+# Test and lint caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Patch/editor leftovers
+*.orig
+*.rej
+*.log
+*.swp
+*~
+.DS_Store
+Thumbs.db
+
+SKILLS.md
+docs
